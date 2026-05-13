@@ -61,6 +61,9 @@ struct AppState {
     sidecar_busy: Arc<AtomicBool>,
     /// True when sidecar is idle in warm standby.
     sidecar_standby: Arc<AtomicBool>,
+    /// Guards against concurrent spawn attempts; set to true while spawn_sidecar
+    /// is in progress, cleared once stdin handle is stored.
+    sidecar_spawning: Arc<AtomicBool>,
     /// Path of the WAV file currently being processed by the worker.
     /// Set in finalize_recording, cleared and deleted by the stdout reader.
     last_wav_path: Arc<Mutex<Option<std::path::PathBuf>>>,
@@ -121,6 +124,7 @@ impl AppState {
             sidecar_last_used_ms: Arc::new(AtomicU64::new(now_millis())),
             sidecar_busy: Arc::new(AtomicBool::new(false)),
             sidecar_standby: Arc::new(AtomicBool::new(false)),
+            sidecar_spawning: Arc::new(AtomicBool::new(false)),
             last_wav_path: Arc::new(Mutex::new(None)),
             shortcut: Arc::new(Mutex::new(DEFAULT_SHORTCUT.to_string())),
             right_ctrl_stop: Arc::new(AtomicBool::new(false)),
@@ -716,10 +720,8 @@ struct HealthStatus {
 async fn run_health_check(app: AppHandle) -> Result<HealthStatus, String> {
     let worker = worker_binary_path();
     let worker_exists = worker.exists();
-
     let model_dir = model_data_dir(&app).unwrap_or_default();
-    let model_exists = model_dir.join("encoder.int8.onnx").exists();
-
+    let model_exists = MODEL_FILES.iter().all(|spec| model_dir.join(spec.name).exists());
     Ok(HealthStatus {
         worker_path: worker.to_string_lossy().into_owned(),
         worker_exists,
@@ -822,19 +824,63 @@ struct MicrophoneTestResult {
 
 #[tauri::command]
 async fn test_microphone(state: tauri::State<'_, SharedState>) -> Result<MicrophoneTestResult, String> {
-    let info = get_audio_input_info(state).await?;
-    let selected = info
-        .selected_device
-        .or(info.default_device)
-        .unwrap_or_else(|| "System Default".to_string());
-    Ok(MicrophoneTestResult {
-        ok: !info.devices.is_empty(),
-        message: if info.devices.is_empty() {
-            "No microphone input devices were found.".to_string()
-        } else {
-            format!("Microphone input is available: {}", selected)
-        },
-    })
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    let host = cpal::default_host();
+    let preferred_name = state.mic_device.lock().unwrap().clone();
+
+    let device = if let Some(ref name) = preferred_name {
+        host.input_devices()
+            .ok()
+            .and_then(|mut iter| iter.find(|d| d.name().ok().as_ref() == Some(name)))
+            .or_else(|| host.default_input_device())
+    } else {
+        host.default_input_device()
+    };
+
+    let device = match device {
+        Some(d) => d,
+        None => return Ok(MicrophoneTestResult {
+            ok: false,
+            message: "No input device found.".to_string(),
+        }),
+    };
+
+    let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+
+    let config = match device.default_input_config() {
+        Ok(c) => c,
+        Err(e) => return Ok(MicrophoneTestResult {
+            ok: false,
+            message: format!("Cannot read config for '{}': {}", device_name, e),
+        }),
+    };
+
+    let stream = device.build_input_stream(
+        &config.into(),
+        |_data: &[f32], _| {},
+        |err| eprintln!("mic test stream error: {}", err),
+        Some(std::time::Duration::from_millis(200)),
+    );
+
+    match stream {
+        Ok(s) => {
+            if let Err(e) = s.play() {
+                return Ok(MicrophoneTestResult {
+                    ok: false,
+                    message: format!("Cannot activate '{}': {}", device_name, e),
+                });
+            }
+            drop(s);
+            Ok(MicrophoneTestResult {
+                ok: true,
+                message: format!("Microphone '{}' is ready.", device_name),
+            })
+        }
+        Err(e) => Ok(MicrophoneTestResult {
+            ok: false,
+            message: format!("Cannot open '{}': {}", device_name, e),
+        }),
+    }
 }
 
 #[tauri::command]
@@ -1574,7 +1620,16 @@ fn worker_binary_path() -> std::path::PathBuf {
 }
 
 fn spawn_sidecar(app: AppHandle, state: SharedState) {
+    // Atomically claim the spawn slot. If another thread already claimed it, bail.
+    if state.sidecar_spawning
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    // Double-check: worker may have been spawned while we waited.
     if state.sidecar_stdin.lock().unwrap().is_some() {
+        state.sidecar_spawning.store(false, Ordering::SeqCst);
         return;
     }
 
@@ -1625,6 +1680,7 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                 serde_json::json!({"message": format!("Could not start STT engine: {}", e)}),
             )
             .ok();
+            state.sidecar_spawning.store(false, Ordering::SeqCst);
             return;
         }
     };
@@ -1632,6 +1688,7 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
     // Store stdin so finalize_recording() can send WAV paths to the sidecar
     let stdin = child.stdin.take().unwrap();
     *state.sidecar_stdin.lock().unwrap() = Some(stdin);
+    state.sidecar_spawning.store(false, Ordering::SeqCst);
     state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
     state.sidecar_standby.store(false, Ordering::SeqCst);
 
@@ -1910,6 +1967,9 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
         "shortcut-triggered",
         serde_json::json!({ "state": "pressed", "shortcut": shortcut }),
     );
+    if state.sidecar_busy.load(Ordering::SeqCst) {
+        return;
+    }
     show_voicebar(&app);
 
     if state.recording.load(Ordering::SeqCst) {
