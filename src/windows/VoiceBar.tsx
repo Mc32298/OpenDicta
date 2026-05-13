@@ -9,28 +9,49 @@ import { IconButton } from "../ui/controls";
 type State = "idle" | "recording" | "processing" | "done" | "error" | "cancelled";
 
 export default function VoiceBar() {
-  const [state, setState]       = useState<State>("idle");
-  const [visible, setVisible]   = useState(false);
+  const [state, setState]           = useState<State>("idle");
+  const [visible, setVisible]       = useState(false);
   const [statusText, setStatusText] = useState("Ready");
-  const [lastError, setLastError] = useState<string | null>(null);
-  const [level, setLevel]       = useState(0);
-  const [waveColor, setWaveColor] = useState("#3082ff");
-  const [shortcut, setShortcut] = useState("F8");
-  const [elapsed, setElapsed]   = useState(0);
-  const doneHideTimerRef = useRef<number | null>(null);
-  const errorHideTimerRef = useRef<number | null>(null);
-  const cancelHideTimerRef = useRef<number | null>(null);
+  const [lastError, setLastError]   = useState<string | null>(null);
+  const [level, setLevel]           = useState(0);
+  const [waveColor, setWaveColor]   = useState("#3082ff");
+  const [shortcut, setShortcut]     = useState("RCtrl");
+  const [elapsed, setElapsed]       = useState(0);
+  const [completionSound, setCompletionSound] = useState(false);
 
-  // Timer while recording
+  const doneHideTimerRef   = useRef<number | null>(null);
+  const errorHideTimerRef  = useRef<number | null>(null);
+  const cancelHideTimerRef = useRef<number | null>(null);
+  // Single AudioContext reused across transcriptions; closed on unmount.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const completionSoundRef = useRef(false);
+
+  // Recording elapsed timer
   useEffect(() => {
     if (state !== "recording") { setElapsed(0); return; }
     const id = setInterval(() => setElapsed(e => e + 1), 1000);
     return () => clearInterval(id);
   }, [state]);
 
+  // Keep completionSoundRef in sync with state
   useEffect(() => {
-    invoke<boolean>("get_voicebar_visible").then(setVisible).catch((e) => console.error("get_voicebar_visible failed", e));
-    const syncVisibilityFromBackend = () => {
+    completionSoundRef.current = completionSound;
+  }, [completionSound]);
+
+  useEffect(() => {
+    // Load initial state from backend
+    invoke<boolean>("get_voicebar_visible").then(setVisible).catch(console.error);
+    invoke<string>("get_waveform_color").then(setWaveColor).catch(console.error);
+    invoke<string>("get_shortcut").then(setShortcut).catch(console.error);
+    invoke<boolean>("get_completion_sound").then((val) => {
+      setCompletionSound(val);
+      completionSoundRef.current = val;
+    }).catch(console.error);
+
+    // Cold-start safeguard: if the hotkey was pressed before our event listeners
+    // registered, sync state from backend. Run a few one-shot checks then stop —
+    // the event-driven listeners handle all transitions after that.
+    const syncOnce = () => {
       invoke<{ recording: boolean }>("get_shortcut_status")
         .then((s) => {
           if (s.recording) {
@@ -39,17 +60,11 @@ export default function VoiceBar() {
             setStatusText((prev) => (prev === "Ready" ? "Listening…" : prev));
           }
         })
-        .catch((e) => console.error("get_shortcut_status failed", e));
+        .catch(console.error);
     };
-    // Cold-start safeguard: if early events were missed, recover from backend truth.
-    syncVisibilityFromBackend();
-    const sync1 = window.setTimeout(syncVisibilityFromBackend, 250);
-    const sync2 = window.setTimeout(syncVisibilityFromBackend, 900);
-    const watchdog = window.setInterval(syncVisibilityFromBackend, 120);
-
-    invoke<{ default_device?: string; devices: string[] }>("get_audio_input_info").catch((e) => console.error("get_audio_input_info failed", e));
-    invoke<string>("get_waveform_color").then(setWaveColor).catch((e) => console.error("get_waveform_color failed", e));
-    invoke<string>("get_shortcut").then(setShortcut).catch((e) => console.error("get_shortcut failed", e));
+    syncOnce();
+    const t1 = window.setTimeout(syncOnce, 250);
+    const t2 = window.setTimeout(syncOnce, 900);
 
     const unlistenStart = listen("recording-started", () => {
       clearHideTimers();
@@ -60,9 +75,7 @@ export default function VoiceBar() {
     });
 
     const unlistenShortcut = listen<{ state?: string }>("shortcut-triggered", (event) => {
-      if (event.payload?.state === "pressed") {
-        setVisible(true);
-      }
+      if (event.payload?.state === "pressed") setVisible(true);
     });
 
     const unlistenStop = listen("recording-stopped", () => {
@@ -83,8 +96,11 @@ export default function VoiceBar() {
       setLastError(null);
       const t = event.payload.text;
       setStatusText(t.slice(0, 64) + (t.length > 64 ? "…" : ""));
-      if (localStorage.getItem("settings.completionSound") === "true") {
-        const ctx = new AudioContext();
+
+      // Play completion sound if enabled (read from ref to avoid stale closure)
+      if (completionSoundRef.current) {
+        if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+        const ctx = audioCtxRef.current;
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.connect(gain);
@@ -95,9 +111,8 @@ export default function VoiceBar() {
         osc.start();
         osc.stop(ctx.currentTime + 0.12);
       }
-      doneHideTimerRef.current = window.setTimeout(() => {
-        hideAndReset();
-      }, 1600);
+
+      doneHideTimerRef.current = window.setTimeout(hideAndReset, 1600);
     });
 
     const unlistenError = listen<{ message: string }>("transcription-error", (event) => {
@@ -105,9 +120,7 @@ export default function VoiceBar() {
       setState("error");
       setLastError(event.payload.message);
       setStatusText(event.payload.message);
-      errorHideTimerRef.current = window.setTimeout(() => {
-        hideAndReset();
-      }, 2500);
+      errorHideTimerRef.current = window.setTimeout(hideAndReset, 2500);
     });
 
     const unlistenLevel = listen<number>("recording-level", (event) => {
@@ -128,10 +141,11 @@ export default function VoiceBar() {
     });
 
     return () => {
-      window.clearTimeout(sync1);
-      window.clearTimeout(sync2);
-      window.clearInterval(watchdog);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
       clearHideTimers();
+      audioCtxRef.current?.close();
+      audioCtxRef.current = null;
       unlistenStart.then(fn => fn());
       unlistenStop.then(fn => fn());
       unlistenDone.then(fn => fn());
@@ -166,7 +180,12 @@ export default function VoiceBar() {
     const onUp = async () => {
       window.removeEventListener("pointermove", onMove);
       const pos = await win.outerPosition();
-      await invoke("set_voicebar_position", { x: pos.x, y: pos.y });
+      // Convert physical pixels → logical pixels before persisting
+      const dpr = window.devicePixelRatio || 1;
+      await invoke("set_voicebar_position", {
+        x: Math.round(pos.x / dpr),
+        y: Math.round(pos.y / dpr),
+      });
     };
 
     window.addEventListener("pointermove", onMove);
@@ -174,31 +193,23 @@ export default function VoiceBar() {
   }
 
   function handleStop() {
-    void invoke("stop_recording").catch((e) => console.error("stop_recording failed", e));
+    void invoke("stop_recording").catch(console.error);
   }
 
   function handleCancel() {
-    if (isError || isIdle) {
-      hideAndReset();
-      return;
-    }
+    if (isError || isIdle) { hideAndReset(); return; }
     if (state === "cancelled") return;
-
-    void invoke("cancel_recording").catch((e) => console.error("cancel_recording failed", e));
+    void invoke("cancel_recording").catch(console.error);
     clearHideTimers();
     setState("cancelled");
     setStatusText("Cancelled");
     setLastError(null);
     setLevel(0);
-    cancelHideTimerRef.current = window.setTimeout(() => {
-      hideAndReset();
-    }, 700);
+    cancelHideTimerRef.current = window.setTimeout(hideAndReset, 700);
   }
 
   async function openSettings() {
-    await invoke("open_settings_page_command", { page: "diagnostics" }).catch((e) => {
-      console.error("open_settings_page_command failed", e);
-    });
+    await invoke("open_settings_page_command", { page: "diagnostics" }).catch(console.error);
   }
 
   function hideAndReset() {
@@ -240,95 +251,79 @@ export default function VoiceBar() {
 
   return (
     <div className={`pill-shell ${visible ? "" : "pill-shell--hidden"}`}>
-    <div className={`pill pill--${state}`} onPointerDown={handleDragStart}>
-      {/* Mic indicator */}
-      <div className="pill-mic">
-        <MicIcon className="pill-mic-icon" />
-      </div>
+      <div className={`pill pill--${state}`} onPointerDown={handleDragStart}>
+        <div className="pill-mic">
+          <MicIcon className="pill-mic-icon" />
+        </div>
 
-      {/* Center body */}
-      <div className="pill-body">
-
-        {/* Recording: waveform + timer */}
-        {isRecording && (
-          <>
-            <div className="pill-wave">
-              <Waveform active={true} level={level} color={waveColor} />
+        <div className="pill-body">
+          {isRecording && (
+            <>
+              <div className="pill-wave">
+                <Waveform active={true} level={level} color={waveColor} />
+              </div>
+              <div className="pill-timer">{fmt(elapsed)}</div>
+            </>
+          )}
+          {isProcessing && (
+            <div className="pill-status">
+              <div className="pill-dots"><span /><span /><span /></div>
+              <span className="pill-status-text pill-status-text--muted">{statusText}</span>
             </div>
-            <div className="pill-timer">{fmt(elapsed)}</div>
-          </>
-        )}
-
-        {/* Processing */}
-        {isProcessing && (
-          <div className="pill-status">
-            <div className="pill-dots">
-              <span /><span /><span />
+          )}
+          {isDone && (
+            <div className="pill-status">
+              <div className="pill-check"><CheckIcon /></div>
+              <span className="pill-status-text pill-status-text--done">{statusText}</span>
             </div>
-            <span className="pill-status-text pill-status-text--muted">{statusText}</span>
-          </div>
-        )}
-
-        {/* Done */}
-        {isDone && (
-          <div className="pill-status">
-            <div className="pill-check">
-              <CheckIcon />
+          )}
+          {isError && (
+            <div className="pill-status">
+              <div className="pill-alert"><AlertIcon /></div>
+              <span className="pill-status-text pill-status-text--error" title={lastError ?? statusText}>
+                {statusText}
+              </span>
             </div>
-            <span className="pill-status-text pill-status-text--done">{statusText}</span>
-          </div>
-        )}
-
-        {/* Error */}
-        {isError && (
-          <div className="pill-status">
-            <div className="pill-alert">
-              <AlertIcon />
+          )}
+          {isCancelled && (
+            <div className="pill-status">
+              <div className="pill-cancelled"><XIcon /></div>
+              <span className="pill-status-text pill-status-text--muted">Cancelled</span>
             </div>
-            <span className="pill-status-text pill-status-text--error" title={lastError ?? statusText}>{statusText}</span>
-          </div>
-        )}
+          )}
+          {isIdle && (
+            <div className="pill-status">
+              <div className="pill-hint">
+                <kbd>{shortcut}</kbd>
+                <span className="pill-hint-text">to record</span>
+              </div>
+            </div>
+          )}
+        </div>
 
-        {/* Cancelled */}
-        {isCancelled && (
-          <div className="pill-status">
-            <div className="pill-cancelled">
+        <div className="pill-actions">
+          {isRecording && (
+            <IconButton className="pill-action" variant="primary" onClick={handleStop} label="Stop recording">
+              <StopIcon />
+            </IconButton>
+          )}
+          {isError && lastError && (
+            <IconButton className="pill-action" onClick={() => void openSettings()} label="Open diagnostics">
+              <GearIcon />
+            </IconButton>
+          )}
+          {(isRecording || isProcessing || isError || isIdle) && (
+            <IconButton
+              className="pill-action"
+              variant={isError ? "danger" : "ghost"}
+              onClick={handleCancel}
+              label={isError ? "Dismiss" : "Cancel"}
+            >
               <XIcon />
-            </div>
-            <span className="pill-status-text pill-status-text--muted">Cancelled</span>
-          </div>
-        )}
-
-        {/* Idle */}
-        {isIdle && (
-          <div className="pill-status">
-            <div className="pill-hint">
-              <kbd>{shortcut}</kbd>
-              <span className="pill-hint-text">to record</span>
-            </div>
-          </div>
-        )}
+            </IconButton>
+          )}
+        </div>
       </div>
-
-      {/* Action buttons */}
-      <div className="pill-actions">
-        {isRecording && (
-          <IconButton className="pill-action" variant="primary" onClick={handleStop} label="Stop recording">
-            <StopIcon />
-          </IconButton>
-        )}
-        {isError && lastError && (
-          <IconButton className="pill-action" onClick={() => void openSettings()} label="Open diagnostics">
-            <GearIcon />
-          </IconButton>
-        )}
-        {(isRecording || isProcessing || isError || isIdle) && (
-          <IconButton className="pill-action" variant={isError ? "danger" : "ghost"} onClick={handleCancel} label={isError ? "Dismiss" : "Cancel"}>
-            <XIcon />
-          </IconButton>
-        )}
-      </div>
-    </div>
     </div>
   );
 }
