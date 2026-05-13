@@ -1,7 +1,17 @@
 import { Suspense, lazy, useEffect } from "react";
 import VoiceBar from "./windows/VoiceBar";
 
-const Settings = lazy(() => import("./windows/Settings"));
+const windowName = new URLSearchParams(window.location.search).get("window") ?? "voicebar";
+
+// Kick off the relevant module import at module-evaluation time — before React
+// mounts. Vite deduplicates these with the lazy() calls below (same promise),
+// so by the time Suspense checks, the module is already resolved and the
+// fallback={null} transparent-window period is eliminated.
+if (windowName === "settings")    void import("./windows/Settings");
+else if (windowName === "onboarding") void import("./windows/Onboarding");
+else if (windowName === "empty")  void import("./windows/EmptyStates");
+
+const Settings   = lazy(() => import("./windows/Settings"));
 const Onboarding = lazy(() => import("./windows/Onboarding"));
 const EmptyStates = lazy(() => import("./windows/EmptyStates"));
 
@@ -14,47 +24,19 @@ function prefetchWindows() {
   void import("./windows/EmptyStates");
 }
 
-function getWindowName(): string {
-  const params = new URLSearchParams(window.location.search);
-  return params.get("window") ?? "voicebar";
-}
-
 export default function App() {
-  const windowName = getWindowName();
-
   useEffect(() => {
     if (windowName !== "voicebar") return;
-    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
-      (window as Window & { requestIdleCallback: (cb: () => void) => number }).requestIdleCallback(() => {
-        prefetchWindows();
-      });
+    if ("requestIdleCallback" in window) {
+      (window as Window & { requestIdleCallback: (cb: () => void) => number }).requestIdleCallback(prefetchWindows);
     } else {
       const id = globalThis.setTimeout(prefetchWindows, 250);
       return () => globalThis.clearTimeout(id);
     }
-  }, [windowName]);
+  }, []);
 
-  if (windowName === "settings") {
-    return (
-      <Suspense fallback={null}>
-        <Settings />
-      </Suspense>
-    );
-  }
-  if (windowName === "onboarding") {
-    return (
-      <Suspense fallback={null}>
-        <Onboarding />
-      </Suspense>
-    );
-  }
-  if (windowName === "empty") {
-    return (
-      <Suspense fallback={null}>
-        <EmptyStates />
-      </Suspense>
-    );
-  }
-
+  if (windowName === "settings")    return <Suspense fallback={null}><Settings /></Suspense>;
+  if (windowName === "onboarding")  return <Suspense fallback={null}><Onboarding /></Suspense>;
+  if (windowName === "empty")       return <Suspense fallback={null}><EmptyStates /></Suspense>;
   return <VoiceBar />;
 }
