@@ -487,6 +487,14 @@ function MicrophoneTab({ accent, onAccentChange }: { accent: string; onAccentCha
   const { showErr, showOk } = useToast();
 
   useEffect(() => {
+    return () => {
+      if (colorDebounceRef.current !== null) {
+        window.clearTimeout(colorDebounceRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     void invoke<{ selected_device?: string; devices: string[] }>("get_audio_input_info")
       .then((info) => {
         setDevices(info.devices || []);

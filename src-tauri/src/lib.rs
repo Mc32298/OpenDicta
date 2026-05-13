@@ -759,6 +759,9 @@ async fn set_shortcut(
     if shortcut.is_empty() {
         return Err("Shortcut cannot be empty".to_string());
     }
+    if shortcut.len() > 64 {
+        return Err("Shortcut string is too long".to_string());
+    }
 
     let old = state.shortcut.lock().unwrap().clone();
     unregister_hotkey(&app, state.inner().clone(), old.as_str())?;
@@ -1124,12 +1127,10 @@ fn save_hf_token_secret(token: Option<&str>) -> Result<(), String> {
 }
 
 fn mask_token(token: &str) -> String {
-    let chars: Vec<char> = token.chars().collect();
-    if chars.len() <= 8 {
-        return "********".to_string();
+    if token.is_empty() {
+        return String::new();
     }
-    let suffix: String = chars[chars.len() - 4..].iter().collect();
-    format!("********{}", suffix)
+    "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string()
 }
 
 async fn compute_sha256_hex(path: &Path) -> Result<String, String> {
@@ -1167,6 +1168,8 @@ fn show_voicebar(app: &AppHandle) {
         // with the Tauri backend. The CSS rule :root[data-vb="1"] overrides the
         // pill-shell--hidden class, so no event round-trip is needed for the
         // first-press case.
+        // SAFETY: eval() string is hardcoded; no user input is interpolated here.
+        // Do not extend this pattern with dynamic values — use win.emit() instead.
         let _ = win.eval("document.documentElement.setAttribute('data-vb','1');");
         let _ = win.emit("voicebar-show", ());
     }
@@ -1177,6 +1180,7 @@ fn hide_voicebar(app: &AppHandle) {
         if let Some(state) = app.try_state::<SharedState>() {
             state.voicebar_visible.store(false, Ordering::SeqCst);
         }
+        // SAFETY: eval() string is hardcoded; no user input is interpolated here.
         let _ = win.eval("document.documentElement.removeAttribute('data-vb');");
         let _ = win.emit("voicebar-hide", ());
     }
@@ -1259,12 +1263,27 @@ fn open_empty_state_page(app: &AppHandle, tab: Option<&str>) {
 
 #[tauri::command]
 async fn open_settings_page_command(app: AppHandle, page: Option<String>) -> Result<(), String> {
+    const VALID_PAGES: &[&str] = &[
+        "general", "shortcuts", "microphone", "model",
+        "appearance", "diagnostics", "about",
+    ];
+    if let Some(ref p) = page {
+        if !VALID_PAGES.contains(&p.as_str()) {
+            return Err(format!("Unknown settings page: {}", p));
+        }
+    }
     open_settings_page(&app, page.as_deref());
     Ok(())
 }
 
 #[tauri::command]
 async fn open_empty_state(app: AppHandle, tab: Option<String>) -> Result<(), String> {
+    const VALID_TABS: &[&str] = &["history", "models", "prompts"];
+    if let Some(ref t) = tab {
+        if !VALID_TABS.contains(&t.as_str()) {
+            return Err(format!("Unknown empty-state tab: {}", t));
+        }
+    }
     open_empty_state_page(&app, tab.as_deref());
     Ok(())
 }
@@ -1793,6 +1812,7 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     if transcript.is_empty() {
                         continue;
                     }
+                    #[cfg(debug_assertions)]
                     println!("Transcript: {}", transcript);
 
                     // Auto-paste the transcript into the previously active app
