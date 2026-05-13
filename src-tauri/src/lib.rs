@@ -10,6 +10,9 @@
 
 use std::io::Write;
 use std::path::Path;
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
@@ -58,6 +61,9 @@ struct AppState {
     sidecar_busy: Arc<AtomicBool>,
     /// True when sidecar is idle in warm standby.
     sidecar_standby: Arc<AtomicBool>,
+    /// Path of the WAV file currently being processed by the worker.
+    /// Set in finalize_recording, cleared and deleted by the stdout reader.
+    last_wav_path: Arc<Mutex<Option<std::path::PathBuf>>>,
 
     /// Active global hotkey in Tauri shortcut format (example: "F8" or "Ctrl+KeyA")
     shortcut: Arc<Mutex<String>>,
@@ -115,6 +121,7 @@ impl AppState {
             sidecar_last_used_ms: Arc::new(AtomicU64::new(now_millis())),
             sidecar_busy: Arc::new(AtomicBool::new(false)),
             sidecar_standby: Arc::new(AtomicBool::new(false)),
+            last_wav_path: Arc::new(Mutex::new(None)),
             shortcut: Arc::new(Mutex::new(DEFAULT_SHORTCUT.to_string())),
             right_ctrl_stop: Arc::new(AtomicBool::new(false)),
             right_ctrl_active: Arc::new(AtomicBool::new(false)),
@@ -172,8 +179,9 @@ async fn cancel_recording(
     app: AppHandle,
     state: tauri::State<'_, SharedState>,
 ) -> Result<(), String> {
-    // Stop the audio capture without transcribing
     state.recording.store(false, Ordering::SeqCst);
+    // Give the cpal callback one tick to finish its current batch before we clear
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     state.audio_buffer.lock().unwrap().clear();
     hide_voicebar(&app);
     Ok(())
@@ -1303,7 +1311,9 @@ fn start_audio_capture(
         }
 
         // Tell the frontend the waveform can start animating
-        app.emit("recording-started", ()).ok();
+        if stop_flag.load(Ordering::SeqCst) {
+            app.emit("recording-started", ()).ok();
+        }
 
         // Keep this thread (and the stream) alive until the stop flag is set.
         // The stream is dropped automatically when this thread ends.
@@ -1318,28 +1328,48 @@ fn start_audio_capture(
 
 // ─── M2: Audio Processing & WAV ──────────────────────────────────────────────
 
-/// Convert a slice of mono f32 samples from `from_rate` Hz to 16000 Hz
-/// using linear interpolation. Parakeet TDT requires 16kHz input.
 fn resample_to_16khz(samples: &[f32], from_rate: u32) -> Vec<f32> {
     if from_rate == 16_000 {
         return samples.to_vec();
     }
+    let ratio = 16_000.0_f64 / from_rate as f64;
+    let params = SincInterpolationParameters {
+        sinc_len: 64,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 128,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    let chunk = samples.len().max(1);
+    let mut resampler = match SincFixedIn::<f32>::new(ratio, 2.0, params, chunk, 1) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Resampler init failed ({e}), using linear fallback");
+            return resample_linear(samples, from_rate);
+        }
+    };
+    let waves_in = vec![samples.to_vec()];
+    match resampler.process(&waves_in, None) {
+        Ok(out) => out.into_iter().next().unwrap_or_default(),
+        Err(e) => {
+            eprintln!("Resampler process failed ({e}), using linear fallback");
+            resample_linear(samples, from_rate)
+        }
+    }
+}
 
-    // How many input samples correspond to one output sample
+fn resample_linear(samples: &[f32], from_rate: u32) -> Vec<f32> {
     let ratio = from_rate as f64 / 16_000.0;
     let out_len = (samples.len() as f64 / ratio) as usize;
     let mut out = Vec::with_capacity(out_len);
-
     for i in 0..out_len {
         let pos = i as f64 * ratio;
         let idx = pos.floor() as usize;
         let frac = (pos - pos.floor()) as f32;
         let s0 = samples.get(idx).copied().unwrap_or(0.0);
         let s1 = samples.get(idx + 1).copied().unwrap_or(0.0);
-        // Linear interpolation between adjacent samples
         out.push(s0 + (s1 - s0) * frac);
     }
-
     out
 }
 
@@ -1413,7 +1443,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     app.emit("recording-stopped", ()).ok();
 
     // 5. Save to a temp WAV file
-    let wav_path = std::env::temp_dir().join("voicenote_recording.wav");
+    let wav_path = std::env::temp_dir().join(format!("voicenote_{}.wav", now_millis()));
     if let Err(e) = save_wav(&samples_16khz, &wav_path) {
         app.emit(
             "transcription-error",
@@ -1451,6 +1481,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
             state.sidecar_busy.store(true, Ordering::SeqCst);
             state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
             state.sidecar_standby.store(false, Ordering::SeqCst);
+            *state.last_wav_path.lock().unwrap() = Some(wav_path.clone());
             // Transcript will arrive as a "transcript-ready" event from the
             // background stdout-reader thread (see spawn_sidecar below)
         }
@@ -1642,6 +1673,9 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     state_for_stdout
                         .sidecar_last_used_ms
                         .store(now_millis(), Ordering::SeqCst);
+                    if let Some(path) = state_for_stdout.last_wav_path.lock().unwrap().take() {
+                        let _ = std::fs::remove_file(&path);
+                    }
                 }
                 Ok(text) if text.starts_with("STATUS:") => {
                     let msg = text["STATUS:".len()..].to_string();
@@ -1675,6 +1709,9 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     state_for_stdout
                         .sidecar_last_used_ms
                         .store(now_millis(), Ordering::SeqCst);
+                    if let Some(path) = state_for_stdout.last_wav_path.lock().unwrap().take() {
+                        let _ = std::fs::remove_file(&path);
+                    }
                 }
                 Ok(other) => {
                     // Ignore non-protocol stdout noise from dependencies.
