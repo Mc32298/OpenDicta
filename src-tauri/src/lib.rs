@@ -1212,9 +1212,9 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
         None => "/?window=settings".to_string(),
     };
     if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.center();
         let _ = win.show();
         let _ = win.set_focus();
-        // Navigate to the requested page if a specific one was requested
         if let Some(p) = page {
             let _ = win.emit("navigate-to-page", p);
         }
@@ -2201,9 +2201,9 @@ pub fn run() {
             setup_tray(app.handle())?;
             setup_hotkey(app.handle(), state.clone())?;
 
-            // Pre-create Settings hidden so first open is instant.
-            // Must be deferred until after the event loop starts — inline creation
-            // during setup fires before the loop is running and the WebView renders blank.
+            // Pre-create Settings off-screen so WebView2 renders eagerly.
+            // visible(false) prevents WebView2 from rendering content, causing a
+            // 10-second blank window on first show. Off-screen + visible is the fix.
             let app_settings = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2220,8 +2220,8 @@ pub fn run() {
                         .resizable(false)
                         .decorations(false)
                         .transparent(true)
-                        .center()
-                        .visible(false)
+                        .position(-32000.0, -32000.0)
+                        .skip_taskbar(true)
                         .build();
                     }
                 });
