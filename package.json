@@ -1,0 +1,31 @@
+{
+  "name": "voicenote",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "cargo build -p voicenote-worker && npm run tauri -- dev",
+    "tauri:dev-cuda": "powershell -File scripts/dev-cuda.ps1",
+    "tauri:build": "cargo build --release -p voicenote-worker && node scripts/copy-worker.mjs && npm run tauri -- build --config src-tauri/tauri.bundle.conf.json"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-global-shortcut": "^2",
+    "@tauri-apps/plugin-clipboard-manager": "^2",
+    "@tauri-apps/plugin-autostart": "^2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.3",
+    "vite": "^5.4.2"
+  }
+}

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Settings Layout Options</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0e0e10; color: #f0f0f5; padding: 32px 24px 48px; }
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  .subtitle { color: #888; font-size: 14px; margin-bottom: 32px; }
+
+  .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 40px; }
+
+  .panel { border: 2px solid transparent; border-radius: 14px; overflow: hidden; cursor: pointer; transition: border-color .15s, transform .1s; }
+  .panel:hover { border-color: #444; transform: translateY(-1px); }
+  .panel.selected { border-color: #0A84FF; }
+  .panel-label { background: #1a1a1e; padding: 14px 18px; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #2a2a2e; }
+  .panel-label .badge { font-size: 10px; padding: 2px 7px; border-radius: 999px; font-weight: 600; }
+  .badge-current { background: rgba(255,255,255,0.1); color: #888; }
+  .badge-proposed { background: rgba(10,132,255,0.2); color: #0A84FF; }
+
+  /* Mini settings window */
+  .win { background: #1C1C1E; display: flex; height: 340px; }
+  .sidebar { width: 150px; background: #1a1a1c; border-right: 1px solid rgba(255,255,255,0.08); padding: 10px 6px; flex-shrink: 0; }
+  .nav-item { padding: 7px 10px; border-radius: 6px; font-size: 12px; display: flex; align-items: center; gap: 7px; margin-bottom: 2px; color: rgba(235,235,245,0.8); }
+  .nav-item.active { background: #0A84FF; color: #fff; }
+  .nav-icon { width: 18px; height: 18px; border-radius: 4px; background: rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: center; font-size: 9px; flex-shrink: 0; }
+  .nav-item.active .nav-icon { background: rgba(255,255,255,0.2); }
+  .nav-item.muted { color: rgba(235,235,245,0.35); }
+
+  .content { flex: 1; padding: 14px 16px; overflow: hidden; }
+  .pane-title { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
+  .pane-sub { font-size: 10px; color: rgba(235,235,245,0.5); margin-bottom: 10px; }
+
+  .group { margin-bottom: 12px; }
+  .group-title { font-size: 9px; text-transform: uppercase; color: rgba(235,235,245,0.35); letter-spacing: .06em; margin-bottom: 5px; padding-left: 3px; }
+  .card { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; overflow: hidden; }
+  .row { display: flex; justify-content: space-between; align-items: center; padding: 8px 11px; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 11px; gap: 8px; }
+  .row:last-child { border-bottom: 0; }
+  .row-label { color: rgba(235,235,245,0.85); flex: 1; min-width: 0; }
+  .row-hint { font-size: 9px; color: rgba(235,235,245,0.4); margin-top: 1px; }
+  .toggle { width: 28px; height: 16px; background: #0A84FF; border-radius: 999px; position: relative; flex-shrink: 0; }
+  .toggle.off { background: rgba(255,255,255,0.15); }
+  .toggle::after { content: ''; position: absolute; top: 2px; right: 2px; width: 12px; height: 12px; border-radius: 50%; background: white; }
+  .toggle.off::after { right: auto; left: 2px; }
+  .btn-mini { font-size: 10px; padding: 3px 8px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.08); color: rgba(235,235,245,0.8); white-space: nowrap; }
+  .btn-mini.primary { background: #0A84FF; border-color: #0A84FF; color: white; }
+  .select-mini { font-size: 10px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); color: rgba(235,235,245,0.8); border-radius: 5px; padding: 3px 6px; max-width: 90px; }
+  .badge-mini { font-size: 9px; padding: 2px 6px; border-radius: 999px; }
+  .badge-ok { background: rgba(48,209,88,0.15); color: #30D158; }
+  .badge-err { background: rgba(255,69,58,0.15); color: #FF453A; }
+  .badge-info { background: rgba(255,255,255,0.08); color: rgba(235,235,245,0.5); }
+  .color-row { display: flex; gap: 5px; }
+  .swatch { width: 14px; height: 14px; border-radius: 50%; }
+  .swatch.active { outline: 2px solid white; outline-offset: 1px; }
+  .kbd-mini { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.14); border-radius: 3px; padding: 1px 5px; font-size: 9px; font-family: monospace; }
+
+  /* Issue callout */
+  .issues { background: rgba(255,69,58,0.08); border: 1px solid rgba(255,69,58,0.2); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
+  .issues h3 { font-size: 12px; color: #FF453A; margin-bottom: 6px; }
+  .issues ul { list-style: none; padding: 0; }
+  .issues li { font-size: 11px; color: rgba(235,235,245,0.7); padding: 2px 0; padding-left: 14px; position: relative; }
+  .issues li::before { content: '✗'; position: absolute; left: 0; color: #FF453A; font-size: 10px; }
+
+  .fixes { background: rgba(48,209,88,0.08); border: 1px solid rgba(48,209,88,0.2); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
+  .fixes h3 { font-size: 12px; color: #30D158; margin-bottom: 6px; }
+  .fixes ul { list-style: none; padding: 0; }
+  .fixes li { font-size: 11px; color: rgba(235,235,245,0.7); padding: 2px 0; padding-left: 14px; position: relative; }
+  .fixes li::before { content: '✓'; position: absolute; left: 0; color: #30D158; font-size: 10px; }
+
+  .select-prompt { margin-top: 32px; text-align: center; font-size: 13px; color: #888; }
+  .divider { height: 1px; background: rgba(255,255,255,0.07); margin: 32px 0; }
+
+  /* Option selection */
+  .option-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .option-card { border: 2px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 18px; cursor: pointer; transition: border-color .15s, background .15s; }
+  .option-card:hover { border-color: rgba(255,255,255,0.25); background: rgba(255,255,255,0.03); }
+  .option-card.selected { border-color: #0A84FF; background: rgba(10,132,255,0.06); }
+  .option-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .option-card p { font-size: 12px; color: #888; line-height: 1.5; }
+  .option-letter { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: rgba(255,255,255,0.08); font-size: 11px; font-weight: 700; margin-bottom: 10px; }
+  .option-card.selected .option-letter { background: #0A84FF; color: white; }
+</style>
+<script>
+  function select(el) {
+    document.querySelectorAll('.option-card').forEach(c => c.classList.remove('selected'));
+    el.classList.add('selected');
+    const choice = el.dataset.choice;
+    const text = el.querySelector('h3').textContent;
+    if (window.__recordChoice) window.__recordChoice(choice, text);
+  }
+</script>
+</head>
+<body>
+
+<h1>Settings — What's broken & the plan to fix it</h1>
+<p class="subtitle">Here's what I found in the code, and two approaches to fix it. Click to pick one.</p>
+
+<div class="issues">
+  <h3>Current problems found in the code</h3>
+  <ul>
+    <li>Microphone device selector is in <strong>General</strong> — it belongs in <strong>Microphone</strong></li>
+    <li>Accent color preview (the "Live" pill) is in <strong>General</strong> — it belongs in <strong>Appearance</strong></li>
+    <li>Tabs use two different row/section components inconsistently (Group/Row vs SettingsSection/SettingsRow)</li>
+    <li>Notice feedback (errors/success) is subtle — easy to miss, never auto-dismisses</li>
+    <li>Shortcut tab captures keys but gives no visual "recording" pulse — feels frozen</li>
+    <li>Model tab shows provider status as a dense single line of text — hard to read</li>
+    <li>About tab is almost empty (just shows version number)</li>
+  </ul>
+</div>
+
+<div class="divider"></div>
+
+<h2 style="font-size:16px; margin-bottom:18px;">Choose an approach</h2>
+
+<div class="option-grid">
+
+  <div class="option-card" data-choice="A" onclick="select(this)">
+    <div class="option-letter">A</div>
+    <h3>Targeted fix + consistent polish</h3>
+    <p>
+      Reorganize tabs so each setting lives in the right place. Unify all rows to use shared components.
+      Improve feedback visibility. Fix the shortcut capture feel. Clean up Model and About tabs.
+      <strong>Keep the same layout, just make it correct and consistent.</strong>
+    </p>
+    <div style="margin-top:12px; font-size:11px; color:#0A84FF;">
+      ✓ Lower risk &nbsp;·&nbsp; ✓ Faster &nbsp;·&nbsp; ✓ No layout surprises
+    </div>
+  </div>
+
+  <div class="option-card" data-choice="B" onclick="select(this)">
+    <div class="option-letter">B</div>
+    <h3>Full visual overhaul</h3>
+    <p>
+      Redesign the settings window with a tighter sidebar, richer content panels, toast-style feedback,
+      inline status indicators, and a fresh visual treatment of each tab — while keeping all existing
+      Tauri commands wired up. <strong>A complete Settings redesign from the ground up.</strong>
+    </p>
+    <div style="margin-top:12px; font-size:11px; color:#0A84FF;">
+      ✓ Much nicer result &nbsp;·&nbsp; ✓ Best UX &nbsp;·&nbsp; Takes more time
+    </div>
+  </div>
+
+</div>
+
+<div class="divider"></div>
+
+<h2 style="font-size:16px; margin-bottom:6px;">Regardless of approach, these fixes apply to both</h2>
+<div class="fixes" style="margin-top:12px;">
+  <h3>Guaranteed fixes in either approach</h3>
+  <ul>
+    <li>Move microphone device selector from General → Microphone tab</li>
+    <li>Move accent preview from General → Appearance tab</li>
+    <li>Auto-dismissing feedback toasts (errors and success messages fade after 4s)</li>
+    <li>Shortcut capture: pulsing "listening" indicator so it feels alive</li>
+    <li>Model tab: split provider status into readable labeled fields</li>
+    <li>Unified row/section components across all 7 tabs</li>
+    <li>About tab: show app name, version, build info, and a "Run health check" shortcut link</li>
+  </ul>
+</div>
+
+<div class="select-prompt">Click an option above, then tell me your choice in the terminal →</div>
+
+<script>
+// Wire into the server's selection system if available
+document.addEventListener('DOMContentLoaded', () => {
+  if (typeof toggleSelect !== 'undefined') {
+    document.querySelectorAll('.option-card').forEach(el => {
+      el.setAttribute('onclick', `toggleSelect(this); select(this)`);
+    });
+  }
+});
+</script>
+</body>
+</html>

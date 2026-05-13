@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "externalBin": ["binaries/voicenote-worker"],
+    "resources": {}
+  }
+}

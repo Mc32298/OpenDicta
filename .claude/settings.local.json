@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\MathiasNielsen-SPINO\\\\Downloads\\\\voicenote_1\\\\voicenote\\\\worker\\\\src\")",
+      "Bash(cargo check *)",
+      "Bash(npm run *)",
+      "Bash(rustc -Vv)",
+      "Bash(node scripts/copy-worker.mjs)",
+      "Bash(cargo build *)",
+      "Bash(cargo metadata *)",
+      "Bash(python -c \"import sys,json; pkg=[p for p in json.load\\(sys.stdin\\)['packages'] if p['name']=='sherpa-onnx']; print\\(pkg[0]['features'] if pkg else 'not found'\\)\")",
+      "Bash(python -c \"import sys,json; data=json.load\\(sys.stdin\\); pkg=[p for p in data['packages'] if p['name']=='sherpa-onnx']; print\\(json.dumps\\(pkg[0]['features'], indent=2\\)\\) if pkg else print\\('not found'\\)\")",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:api.github.com)",
+      "Bash(nvcc --version)",
+      "Bash(nvidia-smi)",
+      "Bash(where cudnn64_9.dll)",
+      "Read(//c/Program Files/NVIDIA GPU Computing Toolkit/**)",
+      "Read(//c/Windows/System32/**)",
+      "Bash(find \"/c/Program Files/NVIDIA\" -name \"cudnn*\" 2>/dev/null | head -20; find \"/c/Windows/System32\" -name \"cudnn*\" 2>/dev/null | head -10)",
+      "Read(//c/Program Files/NVIDIA/**)",
+      "Bash(mkdir -p \"/c/sherpa-onnx-cuda\")",
+      "Read(//c//**)",
+      "Bash(curl -L -o sherpa-cuda.tar.bz2 \"https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.1/sherpa-onnx-v1.13.1-cuda-12.x-cudnn-9.x-win-x64-cuda.tar.bz2\")",
+      "Bash(tar -xjf sherpa-cuda.tar.bz2)",
+      "Bash(SHERPA_ONNX_LIB_DIR=\"C:/sherpa-onnx-cuda/sherpa-onnx-v1.13.1-cuda-12.x-cudnn-9.x-win-x64-cuda/lib\" cargo build -p voicenote-worker)",
+      "Bash(SHERPA_ONNX_LIB_DIR=\"C:/sherpa-onnx-cuda/sherpa-onnx-v1.13.1-cuda-12.x-cudnn-9.x-win-x64-cuda/lib\" cargo build -p voicenote-worker --features cuda)",
+      "Bash(SHERPA_ONNX_LIB_DIR=\"C:/sherpa-onnx-cuda/sherpa-onnx-v1.13.1-cuda-12.x-cudnn-9.x-win-x64-cuda/lib\" cargo build -p voicenote-worker --no-default-features --features cuda)",
+      "Bash('/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/HostX64/x64/dumpbin.exe' /exports /c/sherpa-onnx-cuda/sherpa-onnx-v1.13.1-cuda-12.x-cudnn-9.x-win-x64-cuda/lib/onnxruntime.dll)",
+      "Bash(awk '{print $NF}')",
+      "Bash(rm -f \"C:/Users/MathiasNielsen-SPINO/AppData/Roaming/com.voicenote.app/models/parakeet/encoder.int8.onnx\" \\\\ *)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\MathiasNielsen-SPINO\\\\Downloads\\\\voicenote_1\\\\voicenote\" -Force)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(bash *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\MathiasNielsen-SPINO\\AppData\\Roaming\\com.voicenote.app\\models\\parakeet"
+    ]
+  }
+}

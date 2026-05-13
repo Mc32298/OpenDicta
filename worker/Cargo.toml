@@ -1,0 +1,23 @@
+[package]
+name = "voicenote-worker"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "voicenote-worker"
+path = "src/main.rs"
+
+[features]
+# Default: static CPU-only build, no extra DLLs needed.
+default = ["static"]
+static = ["sherpa-onnx/static"]
+# CUDA: links against shared DLLs from the CUDA-enabled sherpa-onnx build.
+# Build with: cargo build -p voicenote-worker --no-default-features --features cuda
+# Also requires SHERPA_ONNX_LIB_DIR pointing at the extracted CUDA lib dir.
+cuda = ["sherpa-onnx/shared"]
+
+[dependencies]
+sherpa-onnx = { version = "1.13", default-features = false }
+
+# WAV reading
+hound = "3.5"
