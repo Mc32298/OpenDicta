@@ -103,6 +103,7 @@ struct AppState {
     hf_token: Arc<Mutex<Option<String>>>,
     /// True once onboarding has been completed by the user.
     onboarding_completed: Arc<AtomicBool>,
+    completion_sound: Arc<AtomicBool>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -145,6 +146,7 @@ impl AppState {
             })),
             hf_token: Arc::new(Mutex::new(None)),
             onboarding_completed: Arc::new(AtomicBool::new(false)),
+            completion_sound: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -225,8 +227,20 @@ async fn get_shortcut(state: tauri::State<'_, SharedState>) -> Result<String, St
 }
 
 #[tauri::command]
+async fn get_default_shortcut() -> &'static str {
+    DEFAULT_SHORTCUT
+}
+
+#[tauri::command]
 async fn get_waveform_color(state: tauri::State<'_, SharedState>) -> Result<String, String> {
     Ok(state.waveform_color.lock().unwrap().clone())
+}
+
+fn is_valid_hex_color(s: &str) -> bool {
+    let b = s.as_bytes();
+    matches!(b.first(), Some(&b'#'))
+        && matches!(b.len(), 4 | 7)
+        && b[1..].iter().all(|c| c.is_ascii_hexdigit())
 }
 
 #[tauri::command]
@@ -238,6 +252,9 @@ async fn set_waveform_color(
     let color = color.trim().to_string();
     if color.is_empty() {
         return Err("Color cannot be empty".to_string());
+    }
+    if !is_valid_hex_color(&color) {
+        return Err("Color must be a valid hex value (#RGB or #RRGGBB)".to_string());
     }
     *state.waveform_color.lock().unwrap() = color.clone();
     save_app_settings(&app, state.inner().clone())?;
@@ -271,6 +288,8 @@ struct AppSettings {
     hf_token: Option<String>,
     #[serde(default)]
     onboarding_completed: bool,
+    #[serde(default)]
+    completion_sound: bool,
 }
 
 fn default_waveform_color() -> String {
@@ -751,8 +770,17 @@ async fn set_shortcut(
     }
     if !hotkey_is_registered(&app, state.inner(), shortcut.as_str()) {
         let _ = unregister_hotkey(&app, state.inner().clone(), shortcut.as_str());
-        let _ = register_hotkey(&app, state.inner().clone(), &old);
-        return Err(format!("Shortcut '{}' could not be activated on this system", shortcut));
+        return match register_hotkey(&app, state.inner().clone(), &old) {
+            Ok(()) => Err(format!(
+                "Shortcut '{}' could not be activated on this system",
+                shortcut
+            )),
+            Err(e2) => Err(format!(
+                "Shortcut '{}' could not be activated, and restoring '{}' also failed: {}. \
+                 Restart the app to recover recording.",
+                shortcut, old, e2
+            )),
+        };
     }
 
     *state.shortcut.lock().unwrap() = shortcut;
@@ -918,6 +946,21 @@ async fn set_audio_input_device(
 }
 
 #[tauri::command]
+async fn get_completion_sound(state: tauri::State<'_, SharedState>) -> Result<bool, String> {
+    Ok(state.completion_sound.load(Ordering::SeqCst))
+}
+
+#[tauri::command]
+async fn set_completion_sound(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    enabled: bool,
+) -> Result<(), String> {
+    state.completion_sound.store(enabled, Ordering::SeqCst);
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
 async fn get_debug_mic_level(state: tauri::State<'_, SharedState>) -> Result<bool, String> {
     Ok(state.debug_mic_level.load(Ordering::SeqCst))
 }
@@ -998,6 +1041,7 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         onnx_provider: state.onnx_provider.lock().unwrap().clone(),
         hf_token: None,
         onboarding_completed: state.onboarding_completed.load(Ordering::SeqCst),
+        completion_sound: state.completion_sound.load(Ordering::SeqCst),
     };
     let payload = serde_json::to_string(&settings)
         .map_err(|e| format!("Failed to serialize app settings: {}", e))?;
@@ -1039,6 +1083,7 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     state
         .onboarding_completed
         .store(settings.onboarding_completed, Ordering::SeqCst);
+    state.completion_sound.store(settings.completion_sound, Ordering::SeqCst);
     {
         let provider = state.onnx_provider.lock().unwrap().clone();
         let mut rt = state.provider_runtime.lock().unwrap();
@@ -1151,7 +1196,7 @@ fn open_onboarding(app: &AppHandle) {
             "onboarding",
             tauri::WebviewUrl::App("/?window=onboarding".into()),
         )
-        .title("Welcome to WhisperVoice")
+        .title("VoiceNote Setup")
         .inner_size(760.0, 520.0)
         .resizable(false)
         .decorations(false)
@@ -2103,6 +2148,9 @@ pub fn run() {
             get_audio_input_info,
             test_microphone,
             set_audio_input_device,
+            get_completion_sound,
+            set_completion_sound,
+            get_default_shortcut,
             get_debug_mic_level,
             set_debug_mic_level,
             run_health_check,
@@ -2131,7 +2179,7 @@ pub fn run() {
             if let Some((x, y)) = load_voicebar_position(app.handle()) {
                 *state.voicebar_pos.lock().unwrap() = Some((x, y));
                 if let Some(win) = app.get_webview_window("voicebar") {
-                    let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+                    let _ = win.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
                 }
             }
 
@@ -2196,7 +2244,7 @@ pub fn run() {
                 let app_model_hint = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(500));
-                    open_settings_page(&app_model_hint, Some("models"));
+                    open_settings_page(&app_model_hint, Some("model"));
                 });
             }
 
