@@ -74,13 +74,13 @@ export default function Settings() {
         <Sidebar active={page} onSelect={setPage} />
         <main className="wv-main">
           <ToastProvider>
-            {page === "general" && <GeneralTab />}
-            {page === "shortcut" && <ShortcutTab />}
-            {page === "microphone" && <MicrophoneTab accent={accent} onAccentChange={setAccent} />}
-            {page === "model" && <ModelTab />}
-            {page === "appearance" && <AppearanceTab accent={accent} onAccentChange={setAccent} />}
-            {page === "diagnostics" && <DiagnosticsTab />}
-            {page === "about" && <AboutTab onNavigate={setPage} />}
+            <div style={{ display: page === "general" ? "" : "none" }}><GeneralTab /></div>
+            <div style={{ display: page === "shortcut" ? "" : "none" }}><ShortcutTab /></div>
+            <div style={{ display: page === "microphone" ? "" : "none" }}><MicrophoneTab accent={accent} onAccentChange={setAccent} /></div>
+            <div style={{ display: page === "model" ? "" : "none" }}><ModelTab /></div>
+            <div style={{ display: page === "appearance" ? "" : "none" }}><AppearanceTab accent={accent} onAccentChange={setAccent} /></div>
+            <div style={{ display: page === "diagnostics" ? "" : "none" }}><DiagnosticsTab /></div>
+            <div style={{ display: page === "about" ? "" : "none" }}><AboutTab onNavigate={setPage} /></div>
           </ToastProvider>
         </main>
       </div>

@@ -2202,31 +2202,19 @@ pub fn run() {
             setup_hotkey(app.handle(), state.clone())?;
 
             // Pre-create Settings hidden so first open is instant.
-            // Deferred onto the main thread after a short delay so the Settings
-            // webview initialization doesn't race with the voicebar's event-listener
-            // setup — a race that caused the first shortcut press to be silently dropped.
-            let app_settings = app.handle().clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                let app_inner = app_settings.clone();
-                let _ = app_settings.run_on_main_thread(move || {
-                    if app_inner.get_webview_window("settings").is_none() {
-                        let _ = tauri::WebviewWindowBuilder::new(
-                            &app_inner,
-                            "settings",
-                            tauri::WebviewUrl::App("/?window=settings".into()),
-                        )
-                        .title("Settings")
-                        .inner_size(640.0, 560.0)
-                        .resizable(false)
-                        .decorations(false)
-                        .transparent(true)
-                        .center()
-                        .visible(false)
-                        .build();
-                    }
-                });
-            });
+            let _ = tauri::WebviewWindowBuilder::new(
+                app.handle(),
+                "settings",
+                tauri::WebviewUrl::App("/?window=settings".into()),
+            )
+            .title("Settings")
+            .inner_size(640.0, 560.0)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .center()
+            .visible(false)
+            .build();
 
             // First-run onboarding flow.
             let model_ready = model_data_dir(app.handle())
