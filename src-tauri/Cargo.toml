@@ -39,7 +39,7 @@ hound = "3.5"
 enigo = "0.2"
 
 # HTTP client for model file downloads (async, follows redirects, HTTPS)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 futures-util = "0.3"
 sha2 = "0.10"
 rubato = "0.16"

@@ -389,6 +389,10 @@ async fn cancel_recording(
     // Give the cpal callback one tick to finish its current batch before we clear
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     state.audio_buffer.lock().unwrap().clear();
+    // Clear any pending AI profile so the cancelled recording doesn't bleed into
+    // the next one
+    *state.active_profile.lock().unwrap() = None;
+    let _ = app.emit("active-profile-changed", serde_json::Value::Null);
     hide_voicebar(&app);
     Ok(())
 }
@@ -2043,14 +2047,55 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     #[cfg(debug_assertions)]
                     println!("Transcript: {}", transcript);
 
-                    // Auto-paste the transcript into the previously active app
-                    paste_text(&transcript);
+                    // Check if an AI profile should be applied (take() clears it atomically)
+                    let active_profile = state_for_stdout.active_profile.lock().unwrap().take();
+
+                    let final_text = if let Some(ref profile_id) = active_profile {
+                        // Notify the UI that we are applying AI
+                        let _ = app_stdout.emit(
+                            "sidecar-status",
+                            serde_json::json!({ "message": "Applying AI\u{2026}" }),
+                        );
+
+                        let backend = state_for_stdout.ai_backend.lock().unwrap().clone();
+                        let model = state_for_stdout.ai_model.lock().unwrap().clone();
+                        let ollama_url = state_for_stdout.ai_ollama_url.lock().unwrap().clone();
+                        let api_key = keyring::Entry::new("voicenote", "ai_api_key")
+                            .ok()
+                            .and_then(|e| e.get_password().ok())
+                            .unwrap_or_default();
+
+                        match tauri::async_runtime::block_on(apply_ai_profile(
+                            &transcript,
+                            profile_id,
+                            &backend,
+                            &model,
+                            &api_key,
+                            &ollama_url,
+                        )) {
+                            Ok(processed) => processed,
+                            Err(e) => {
+                                eprintln!("AI post-processing failed: {}", e);
+                                let _ = app_stdout.emit(
+                                    "ai-processing-error",
+                                    serde_json::json!({ "message": e }),
+                                );
+                                // Fall back to raw transcript
+                                transcript.clone()
+                            }
+                        }
+                    } else {
+                        transcript.clone()
+                    };
+
+                    // Auto-paste the result into the previously active app
+                    paste_text(&final_text);
 
                     // Notify the Voice Bar UI
                     app_stdout
                         .emit(
                             "transcript-ready",
-                            serde_json::json!({"text": transcript}),
+                            serde_json::json!({ "text": final_text }),
                         )
                         .ok();
                     state_for_stdout
@@ -2135,6 +2180,97 @@ fn kill_sidecar(state: &SharedState) {
     state.sidecar_standby.store(false, Ordering::SeqCst);
     state.sidecar_busy.store(false, Ordering::SeqCst);
     println!("STT worker stopped — RAM freed");
+}
+
+// ─── AI Post-Processing ───────────────────────────────────────────────────────
+//
+// Sends the raw transcript to the configured AI backend and returns the
+// processed text.  Supports OpenAI, Anthropic, and Ollama.
+
+async fn apply_ai_profile(
+    transcript: &str,
+    profile_id: &str,
+    backend: &str,
+    model: &str,
+    api_key: &str,
+    ollama_url: &str,
+) -> Result<String, String> {
+    let system_prompt = PROFILES
+        .iter()
+        .find(|p| p.id == profile_id)
+        .map(|p| p.system_prompt)
+        .ok_or_else(|| format!("Unknown profile: {}", profile_id))?;
+
+    let client = reqwest::Client::new();
+
+    match backend {
+        "openai" => {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": transcript}
+                ],
+                "max_tokens": 1024
+            });
+            let resp = client
+                .post("https://api.openai.com/v1/chat/completions")
+                .bearer_auth(api_key)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("OpenAI request failed: {}", e))?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            json["choices"][0]["message"]["content"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .ok_or_else(|| format!("Unexpected OpenAI response: {}", json))
+        }
+        "anthropic" => {
+            let body = serde_json::json!({
+                "model": model,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": transcript}],
+                "max_tokens": 1024
+            });
+            let resp = client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Anthropic request failed: {}", e))?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            json["content"][0]["text"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .ok_or_else(|| format!("Unexpected Anthropic response: {}", json))
+        }
+        "ollama" => {
+            let body = serde_json::json!({
+                "model": model,
+                "stream": false,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": transcript}
+                ]
+            });
+            let url = format!("{}/api/chat", ollama_url.trim_end_matches('/'));
+            let resp = client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Ollama request failed: {}", e))?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            json["message"]["content"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .ok_or_else(|| format!("Unexpected Ollama response: {}", json))
+        }
+        other => Err(format!("Unknown AI backend: {}", other)),
+    }
 }
 
 // ─── M4: Auto-paste ───────────────────────────────────────────────────────────
@@ -2271,6 +2407,24 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
 
     state.recording.store(true, Ordering::SeqCst);
     state.audio_buffer.lock().unwrap().clear();
+
+    // Detect if the pressed hotkey maps to an AI profile
+    {
+        let profile_id = {
+            let hotkeys = state.profile_hotkeys.lock().unwrap();
+            hotkeys
+                .iter()
+                .find(|(_, hk)| hk.as_str() == shortcut.as_str())
+                .map(|(id, _)| id.clone())
+        };
+        let profile_name = profile_id
+            .as_deref()
+            .and_then(|id| PROFILES.iter().find(|p| p.id == id))
+            .map(|p| p.name)
+            .unwrap_or("");
+        *state.active_profile.lock().unwrap() = profile_id;
+        let _ = app.emit("active-profile-changed", profile_name);
+    }
 
     start_audio_capture(
         app.clone(),
