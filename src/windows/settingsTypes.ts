@@ -10,7 +10,10 @@ export interface ProfileInfo {
   hotkey: string | null;
 }
 
+export type AiDefaultMode = "raw" | "clean" | "translate" | "clean_translate";
+
 export interface AiSettings {
+  default_mode: AiDefaultMode;
   backend: "openai" | "anthropic" | "ollama";
   model: string;
   api_key_masked: string;

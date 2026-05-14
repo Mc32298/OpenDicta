@@ -259,7 +259,37 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   position: relative;
   z-index: 1;
 }
+/* Keep option list readable on dark background */
+.wv-select option {
+  background: #1c1c22;
+  color: #F5F5F7;
+}
 .wv-input { min-width: 170px; }
+
+/* Segmented control — used in AI tab mode picker */
+.wv-seg {
+  display: flex;
+  gap: 2px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  padding: 3px;
+}
+.wv-seg-btn {
+  flex: 1;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: var(--text-sub, #94a3b8);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.wv-seg-btn:hover:not(:disabled) { background: rgba(255,255,255,0.08); color: #F5F5F7; }
+.wv-seg-btn[data-active="1"] { background: var(--ac, #0A84FF); color: #fff; }
+.wv-seg-btn:disabled { opacity: 0.5; cursor: default; }
 .wv-inline { display: flex; align-items: center; gap: 6px; }
 .wv-inline-stack { align-items: flex-end; flex-direction: column; gap: 6px; }
 .wv-note { font-size: 12px; color: var(--text-sub); }

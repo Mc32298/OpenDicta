@@ -104,6 +104,9 @@ struct AppState {
     /// True once onboarding has been completed by the user.
     onboarding_completed: Arc<AtomicBool>,
     completion_sound: Arc<AtomicBool>,
+    /// Default processing mode for every recording (unless a profile hotkey overrides).
+    /// Values: "raw" | "clean" | "translate" | "clean_translate"
+    ai_default_mode: Arc<Mutex<String>>,
     /// AI backend: "openai" | "anthropic" | "ollama"
     ai_backend: Arc<Mutex<String>>,
     /// AI model name, e.g. "gpt-4o-mini"
@@ -157,6 +160,7 @@ impl AppState {
             hf_token: Arc::new(Mutex::new(None)),
             onboarding_completed: Arc::new(AtomicBool::new(false)),
             completion_sound: Arc::new(AtomicBool::new(false)),
+            ai_default_mode: Arc::new(Mutex::new("raw".to_string())),
             ai_backend: Arc::new(Mutex::new("openai".to_string())),
             ai_model: Arc::new(Mutex::new("gpt-4o-mini".to_string())),
             ai_ollama_url: Arc::new(Mutex::new("http://localhost:11434".to_string())),
@@ -243,6 +247,7 @@ async fn get_profiles(state: tauri::State<'_, SharedState>) -> Result<Vec<Profil
 
 #[derive(serde::Serialize)]
 struct AiSettingsInfo {
+    default_mode: String,
     backend: String,
     model: String,
     api_key_masked: String,
@@ -257,12 +262,32 @@ async fn get_ai_settings(state: tauri::State<'_, SharedState>) -> Result<AiSetti
         .and_then(|e| e.get_password().ok())
         .unwrap_or_default();
     Ok(AiSettingsInfo {
+        default_mode: state.ai_default_mode.lock().unwrap().clone(),
         backend: state.ai_backend.lock().unwrap().clone(),
         model: state.ai_model.lock().unwrap().clone(),
         api_key_masked: mask_token(&raw_key),
         ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
         profile_hotkeys: state.profile_hotkeys.lock().unwrap().clone(),
     })
+}
+
+#[tauri::command]
+async fn get_ai_default_mode(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    Ok(state.ai_default_mode.lock().unwrap().clone())
+}
+
+#[tauri::command]
+async fn set_ai_default_mode(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    mode: String,
+) -> Result<(), String> {
+    const VALID: &[&str] = &["raw", "clean", "translate", "clean_translate"];
+    if !VALID.contains(&mode.as_str()) {
+        return Err(format!("Unknown mode: {}", mode));
+    }
+    *state.ai_default_mode.lock().unwrap() = mode;
+    save_app_settings(&app, state.inner().clone())
 }
 
 #[tauri::command]
@@ -494,6 +519,8 @@ struct AppSettings {
     onboarding_completed: bool,
     #[serde(default)]
     completion_sound: bool,
+    #[serde(default = "default_ai_default_mode")]
+    ai_default_mode: String,
     #[serde(default = "default_ai_backend")]
     ai_backend: String,
     #[serde(default = "default_ai_model")]
@@ -522,6 +549,10 @@ fn default_runtime_profile() -> String {
 
 fn default_onnx_provider() -> String {
     "cpu".to_string()
+}
+
+fn default_ai_default_mode() -> String {
+    "raw".to_string()
 }
 
 fn default_ai_backend() -> String {
@@ -1269,6 +1300,7 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         hf_token: None,
         onboarding_completed: state.onboarding_completed.load(Ordering::SeqCst),
         completion_sound: state.completion_sound.load(Ordering::SeqCst),
+        ai_default_mode: state.ai_default_mode.lock().unwrap().clone(),
         ai_backend: state.ai_backend.lock().unwrap().clone(),
         ai_model: state.ai_model.lock().unwrap().clone(),
         ai_ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
@@ -1315,6 +1347,7 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
         .onboarding_completed
         .store(settings.onboarding_completed, Ordering::SeqCst);
     state.completion_sound.store(settings.completion_sound, Ordering::SeqCst);
+    *state.ai_default_mode.lock().unwrap() = settings.ai_default_mode;
     *state.ai_backend.lock().unwrap() = settings.ai_backend;
     *state.ai_model.lock().unwrap() = settings.ai_model;
     *state.ai_ollama_url.lock().unwrap() = settings.ai_ollama_url;
@@ -2049,8 +2082,23 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
 
                     // Check if an AI profile should be applied (take() clears it atomically)
                     let active_profile = state_for_stdout.active_profile.lock().unwrap().take();
+                    let default_mode = state_for_stdout.ai_default_mode.lock().unwrap().clone();
 
-                    let final_text = if let Some(ref profile_id) = active_profile {
+                    // Resolve the effective system prompt:
+                    // 1. Profile hotkey takes priority.
+                    // 2. Otherwise, fall back to the configured default mode.
+                    let effective_prompt: Option<&'static str> = if let Some(ref pid) = active_profile {
+                        PROFILES.iter().find(|p| p.id == pid).map(|p| p.system_prompt)
+                    } else {
+                        match default_mode.as_str() {
+                            "clean" => Some("Fix grammar and punctuation. Preserve meaning and tone. Return only the corrected text, no explanation."),
+                            "translate" => Some("Translate to English. Return only the translation, no explanation or preamble."),
+                            "clean_translate" => Some("Fix grammar and punctuation, then translate to English. Return only the final corrected and translated text."),
+                            _ => None, // "raw" — no AI processing
+                        }
+                    };
+
+                    let final_text = if let Some(prompt) = effective_prompt {
                         // Notify the UI that we are applying AI
                         let _ = app_stdout.emit(
                             "sidecar-status",
@@ -2065,9 +2113,9 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                             .and_then(|e| e.get_password().ok())
                             .unwrap_or_default();
 
-                        match tauri::async_runtime::block_on(apply_ai_profile(
+                        match tauri::async_runtime::block_on(apply_ai_with_prompt(
                             &transcript,
-                            profile_id,
+                            prompt,
                             &backend,
                             &model,
                             &api_key,
@@ -2187,20 +2235,15 @@ fn kill_sidecar(state: &SharedState) {
 // Sends the raw transcript to the configured AI backend and returns the
 // processed text.  Supports OpenAI, Anthropic, and Ollama.
 
-async fn apply_ai_profile(
+/// Core AI call — sends `transcript` to the backend with the given `system_prompt`.
+async fn apply_ai_with_prompt(
     transcript: &str,
-    profile_id: &str,
+    system_prompt: &str,
     backend: &str,
     model: &str,
     api_key: &str,
     ollama_url: &str,
 ) -> Result<String, String> {
-    let system_prompt = PROFILES
-        .iter()
-        .find(|p| p.id == profile_id)
-        .map(|p| p.system_prompt)
-        .ok_or_else(|| format!("Unknown profile: {}", profile_id))?;
-
     let client = reqwest::Client::new();
 
     match backend {
@@ -2572,6 +2615,8 @@ pub fn run() {
             set_autostart_enabled,
             get_profiles,
             get_ai_settings,
+            get_ai_default_mode,
+            set_ai_default_mode,
             set_ai_backend,
             set_ai_api_key,
             set_ai_model,

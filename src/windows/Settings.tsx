@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AiSettings, HealthStatus, Page, ProfileInfo, ProviderRuntimeStatus, ShortcutStatus } from "./settingsTypes";
+import type { AiDefaultMode, AiSettings, HealthStatus, Page, ProfileInfo, ProviderRuntimeStatus, ShortcutStatus } from "./settingsTypes";
 import { Button, SettingsRow, SettingsSection, StatusBadge, ToggleSwitch } from "../ui/controls";
 import { ToastProvider, useToast } from "../ui/toast";
 import { ActivityIcon, BoxIcon, GearIcon, InfoIcon, KeyboardIcon, MicIcon, PaletteIcon } from "../ui/icons";
@@ -717,6 +717,13 @@ function AboutTab({ onNavigate }: { onNavigate: (page: Page) => void }) {
   );
 }
 
+const AI_MODES: Array<{ value: AiDefaultMode; label: string; hint: string }> = [
+  { value: "raw",           label: "Raw",             hint: "Paste transcript as-is" },
+  { value: "clean",         label: "Clean",           hint: "Fix grammar & punctuation" },
+  { value: "translate",     label: "Translate",       hint: "Translate to English" },
+  { value: "clean_translate", label: "Clean + Translate", hint: "Fix grammar, then translate" },
+];
+
 function AiTab() {
   const [settings, setSettings] = useState<AiSettings | null>(null);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
@@ -774,6 +781,18 @@ function AiTab() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [capturingFor]);
+
+  const saveDefaultMode = async (mode: AiDefaultMode) => {
+    setBusy(true);
+    try {
+      await invoke("set_ai_default_mode", { mode });
+      setSettings((s) => (s ? { ...s, default_mode: mode } : s));
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const saveBackend = async (backend: AiSettings["backend"]) => {
     setBusy(true);
@@ -855,11 +874,32 @@ function AiTab() {
 
   return (
     <div className="wv-pane">
-      <PaneHeader title="AI ✦" subtitle="Reshape transcripts automatically using an AI profile." />
+      <PaneHeader title="AI ✦" subtitle="Reshape transcripts automatically after every recording." />
+
+      <SettingsSection title="Default processing">
+        <SettingsRow label="Output mode" hint="Applied to every recording. Profile hotkeys override this." last>
+          <div className="wv-seg">
+            {AI_MODES.map((m) => (
+              <button
+                key={m.value}
+                type="button"
+                className="wv-seg-btn"
+                data-active={settings.default_mode === m.value ? "1" : "0"}
+                disabled={busy}
+                title={m.hint}
+                onClick={() => void saveDefaultMode(m.value)}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </SettingsRow>
+      </SettingsSection>
 
       <SettingsSection title="AI Backend">
         <SettingsRow label="Provider">
           <select
+            className="wv-select"
             value={settings.backend}
             disabled={busy}
             onChange={(e) => void saveBackend(e.target.value as AiSettings["backend"])}
@@ -874,6 +914,7 @@ function AiTab() {
           <>
             <SettingsRow label="API Key" hint="Stored securely in the OS keyring — never written to disk.">
               <input
+                className="wv-input"
                 type="password"
                 placeholder={settings.api_key_masked || "sk-…"}
                 value={apiKeyInput}
@@ -887,6 +928,7 @@ function AiTab() {
             </SettingsRow>
             <SettingsRow label="Model" hint='e.g. "gpt-4o-mini" or "claude-3-haiku-20240307"' last>
               <input
+                className="wv-input"
                 type="text"
                 defaultValue={settings.model}
                 disabled={busy}
@@ -901,6 +943,7 @@ function AiTab() {
           <>
             <SettingsRow label="Ollama URL">
               <input
+                className="wv-input"
                 type="text"
                 defaultValue={settings.ollama_url}
                 disabled={busy}
@@ -910,6 +953,7 @@ function AiTab() {
             </SettingsRow>
             <SettingsRow label="Model" hint='e.g. "llama3"' last>
               <input
+                className="wv-input"
                 type="text"
                 defaultValue={settings.model}
                 disabled={busy}
