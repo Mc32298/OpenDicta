@@ -2430,38 +2430,12 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     paste_text(&final_text);
 
                     // Notify the Voice Bar UI
-                    app_stdout
-                        .emit(
-                            "transcript-ready",
-                            serde_json::json!({ "text": final_text }),
-                        )
-                        .await
-                        {
-                            Ok(final_text) => {
-                                paste_text(&final_text);
-                                let _ = app_for_transform.emit(
-                                    "transcript-ready",
-                                    serde_json::json!({ "text": final_text }),
-                                );
-                                finish_transcript_request(&state_for_transform);
-                            }
-                            Err(err) => {
-                                eprintln!("AI post-process failed: {:?}", err);
-                                paste_text(&transcript_fallback);
-                                let _ = app_for_transform.emit(
-                                    "transcription-error",
-                                    serde_json::json!({
-                                        "message": format!("AI post-processing failed: {:?}", err)
-                                    }),
-                                );
-                                let _ = app_for_transform.emit(
-                                    "transcript-ready",
-                                    serde_json::json!({ "text": transcript_for_ui }),
-                                );
-                                finish_transcript_request(&state_for_transform);
-                            }
-                        }
-                    });
+                    let _ = app_stdout.emit(
+                        "transcript-ready",
+                        serde_json::json!({ "text": final_text }),
+                    );
+                    hide_voicebar(&app_stdout);
+                    finish_transcript_request(&state_for_stdout);
                 }
                 Ok(other) => {
                     // Ignore non-protocol stdout noise from dependencies.
