@@ -18,6 +18,7 @@ export default function VoiceBar() {
   const [shortcut, setShortcut]     = useState("RCtrl");
   const [elapsed, setElapsed]       = useState(0);
   const [completionSound, setCompletionSound] = useState(false);
+  const [activeProfile, setActiveProfile] = useState<string | null>(null);
 
   const doneHideTimerRef   = useRef<number | null>(null);
   const errorHideTimerRef  = useRef<number | null>(null);
@@ -140,6 +141,10 @@ export default function VoiceBar() {
       hideAndReset();
     });
 
+    const unlistenProfile = listen<string | null>("active-profile-changed", (event) => {
+      setActiveProfile(event.payload ?? null);
+    });
+
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
@@ -156,11 +161,13 @@ export default function VoiceBar() {
       unlistenShortcut.then(fn => fn());
       unlistenShow.then(fn => fn());
       unlistenHide.then(fn => fn());
+      unlistenProfile.then(fn => fn());
     };
   }, []);
 
   useEffect(() => {
     if (state !== "recording") setLevel(0);
+    if (state === "idle" || state === "cancelled") setActiveProfile(null);
   }, [state]);
 
   async function handleDragStart(e: React.PointerEvent<HTMLDivElement>) {
@@ -250,6 +257,7 @@ export default function VoiceBar() {
   const isCancelled  = state === "cancelled";
 
   return (
+    <div className="voicebar-wrapper">
     <div className={`pill-shell ${visible ? "" : "pill-shell--hidden"}`}>
       <div className={`pill pill--${state}`} onPointerDown={handleDragStart}>
         <div className="pill-mic">
@@ -324,6 +332,10 @@ export default function VoiceBar() {
           )}
         </div>
       </div>
+    </div>
+    {activeProfile && state === "recording" && (
+      <div className="profile-badge">✦ {activeProfile}</div>
+    )}
     </div>
   );
 }

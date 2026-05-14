@@ -429,3 +429,26 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%       { opacity: 0.4; transform: scale(0.8); }
 }
+
+/* ── AI profile badge (VoiceBar) ──────────────────────────────────────────── */
+
+.voicebar-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+}
+
+.profile-badge {
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: #93c5fd;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  white-space: nowrap;
+}
