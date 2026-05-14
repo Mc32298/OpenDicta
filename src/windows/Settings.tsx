@@ -2,7 +2,16 @@ import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { HealthStatus, Page, ProviderRuntimeStatus, ShortcutStatus } from "./settingsTypes";
+import type {
+  AiPreset,
+  AiProvider,
+  AiModel,
+  AiSettingsPayload,
+  HealthStatus,
+  Page,
+  ProviderRuntimeStatus,
+  ShortcutStatus,
+} from "./settingsTypes";
 import { Button, SettingsRow, SettingsSection, StatusBadge, ToggleSwitch } from "../ui/controls";
 import { ToastProvider, useToast } from "../ui/toast";
 import { ActivityIcon, BoxIcon, GearIcon, InfoIcon, KeyboardIcon, MicIcon, PaletteIcon } from "../ui/icons";
@@ -17,6 +26,7 @@ const PAGE_ALIASES: Record<string, Page> = {
   microphone: "microphone",
   model: "model",
   models: "model",
+  ai: "ai",
   appearance: "appearance",
   diagnostics: "diagnostics",
   about: "about",
@@ -40,6 +50,10 @@ export default function Settings() {
   const closeSettings = () => {
     void getCurrentWindow().hide();
   };
+
+  useEffect(() => {
+    void getCurrentWindow().setFocus();
+  }, []);
 
   useEffect(() => {
     const unlisten = listen<string>("navigate-to-page", (event) => {
@@ -74,13 +88,30 @@ export default function Settings() {
         <Sidebar active={page} onSelect={setPage} />
         <main className="wv-main">
           <ToastProvider>
-            <div style={{ display: page === "general" ? "" : "none" }}><GeneralTab /></div>
-            <div style={{ display: page === "shortcut" ? "" : "none" }}><ShortcutTab /></div>
-            <div style={{ display: page === "microphone" ? "" : "none" }}><MicrophoneTab accent={accent} onAccentChange={setAccent} /></div>
-            <div style={{ display: page === "model" ? "" : "none" }}><ModelTab /></div>
-            <div style={{ display: page === "appearance" ? "" : "none" }}><AppearanceTab accent={accent} onAccentChange={setAccent} /></div>
-            <div style={{ display: page === "diagnostics" ? "" : "none" }}><DiagnosticsTab /></div>
-            <div style={{ display: page === "about" ? "" : "none" }}><AboutTab onNavigate={setPage} /></div>
+            <section className="wv-page" data-active={page === "general" ? "1" : "0"} style={{ display: page === "general" ? "" : "none" }}>
+              <GeneralTab />
+            </section>
+            <section className="wv-page" data-active={page === "shortcut" ? "1" : "0"} style={{ display: page === "shortcut" ? "" : "none" }}>
+              <ShortcutTab />
+            </section>
+            <section className="wv-page" data-active={page === "microphone" ? "1" : "0"} style={{ display: page === "microphone" ? "" : "none" }}>
+              <MicrophoneTab accent={accent} onAccentChange={setAccent} />
+            </section>
+            <section className="wv-page" data-active={page === "model" ? "1" : "0"} style={{ display: page === "model" ? "" : "none" }}>
+              <ModelTab />
+            </section>
+            <section className="wv-page" data-active={page === "ai" ? "1" : "0"} style={{ display: page === "ai" ? "" : "none" }}>
+              <AiTab />
+            </section>
+            <section className="wv-page" data-active={page === "appearance" ? "1" : "0"} style={{ display: page === "appearance" ? "" : "none" }}>
+              <AppearanceTab accent={accent} onAccentChange={setAccent} />
+            </section>
+            <section className="wv-page" data-active={page === "diagnostics" ? "1" : "0"} style={{ display: page === "diagnostics" ? "" : "none" }}>
+              <DiagnosticsTab />
+            </section>
+            <section className="wv-page" data-active={page === "about" ? "1" : "0"} style={{ display: page === "about" ? "" : "none" }}>
+              <AboutTab onNavigate={setPage} />
+            </section>
           </ToastProvider>
         </main>
       </div>
@@ -99,6 +130,45 @@ function PaneHeader({ title, subtitle }: { title: string; subtitle: string }) {
   );
 }
 
+function ChoiceGroup({
+  children,
+  compact = false,
+}: {
+  children: React.ReactNode;
+  compact?: boolean;
+}) {
+  return (
+    <div className="wv-choice-group" data-compact={compact ? "1" : "0"}>
+      {children}
+    </div>
+  );
+}
+
+function ChoiceButton({
+  active,
+  onClick,
+  disabled,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="wv-choice-btn"
+      data-active={active ? "1" : "0"}
+      aria-pressed={active}
+      onClick={onClick}
+      disabled={disabled}
+    >
+      {children}
+    </button>
+  );
+}
+
 
 function Sidebar({ active, onSelect }: { active: Page; onSelect: (page: Page) => void }) {
   const tabs: Array<{ id: Page; label: string; icon: React.ReactNode }> = [
@@ -106,6 +176,7 @@ function Sidebar({ active, onSelect }: { active: Page; onSelect: (page: Page) =>
     { id: "shortcut", label: "Shortcut", icon: <KeyboardIcon /> },
     { id: "microphone", label: "Microphone", icon: <MicIcon /> },
     { id: "model", label: "Model", icon: <BoxIcon /> },
+    { id: "ai", label: "AI", icon: <ActivityIcon /> },
     { id: "appearance", label: "Appearance", icon: <PaletteIcon /> },
     { id: "diagnostics", label: "Diagnostics", icon: <ActivityIcon /> },
     { id: "about", label: "About", icon: <InfoIcon /> },
@@ -115,14 +186,21 @@ function Sidebar({ active, onSelect }: { active: Page; onSelect: (page: Page) =>
     <aside className="wv-sidebar">
       <div className="wv-sidebar-head">
         <span className="wv-brand-mark"><MicIcon /></span>
-        <div>
+        <div className="wv-brand-block">
           <div className="wv-brand-name">VoiceNote</div>
           <div className="wv-brand-ver">Version 0.1.0</div>
         </div>
       </div>
       <nav className="wv-nav">
         {tabs.map((t) => (
-          <button type="button" key={t.id} className="wv-nav-item" data-active={t.id === active ? "1" : "0"} onClick={() => onSelect(t.id)}>
+          <button
+            type="button"
+            key={t.id}
+            className="wv-nav-item"
+            data-active={t.id === active ? "1" : "0"}
+            aria-current={t.id === active ? "page" : undefined}
+            onClick={() => onSelect(t.id)}
+          >
             <span className="wv-nav-icon">{t.icon}</span>
             <span>{t.label}</span>
           </button>
@@ -637,6 +715,372 @@ function AppearanceTab({ accent, onAccentChange }: { accent: string; onAccentCha
           <Button variant="ghost" busy={busy} busyLabel="Resetting…" onClick={() => void resetVoicebarPosition()}>
             Reset Position
           </Button>
+        </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
+
+function AiTab() {
+  const aiLanguages = ["English", "Danish", "German", "French", "Spanish"] as const;
+  const presetOptions: Array<{ value: AiPreset; label: string }> = [
+    { value: "raw", label: "Raw" },
+    { value: "clean", label: "Clean" },
+    { value: "professional", label: "Professional" },
+    { value: "translate", label: "Translate" },
+    { value: "clean_translate", label: "Clean + Translate" },
+  ];
+  const providerOptions: Array<{ value: AiProvider; label: string }> = [
+    { value: "openai", label: "OpenAI" },
+    { value: "gemini", label: "Gemini" },
+  ];
+  const modelOptions: Array<{ value: AiModel; label: string; provider: AiProvider }> = [
+    { value: "gpt-5-mini", label: "GPT-5 mini", provider: "openai" },
+    { value: "gpt-5-nano", label: "GPT-5 nano", provider: "openai" },
+    { value: "gpt-4.1-mini", label: "GPT-4.1 mini", provider: "openai" },
+    { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", provider: "gemini" },
+    { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash", provider: "gemini" },
+  ];
+  const [settings, setSettings] = useState<AiSettingsPayload | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [openAiInput, setOpenAiInput] = useState("");
+  const [geminiInput, setGeminiInput] = useState("");
+  const { showErr, showOk, showInfo } = useToast();
+
+  const refresh = async () => {
+    const next = await invoke<AiSettingsPayload>("get_ai_settings");
+    setSettings(next);
+  };
+
+  useEffect(() => {
+    void refresh().catch((e) => showErr(`Could not load AI settings: ${String(e)}`));
+  }, []);
+
+  const requiresProvider = (preset: AiPreset) => preset !== "raw";
+  const requiresTargetLanguage = (preset: AiPreset) => preset === "translate" || preset === "clean_translate";
+  const isAiPreset = (value: string): value is AiPreset =>
+    value === "raw" || value === "clean" || value === "professional" || value === "translate" || value === "clean_translate";
+  const isAiProvider = (value: string): value is AiProvider => value === "openai" || value === "gemini";
+  const isAiModel = (value: string): value is AiModel =>
+    modelOptions.some((option) => option.value === value);
+  const isSupportedLanguage = (value: string): value is (typeof aiLanguages)[number] =>
+    aiLanguages.includes(value as (typeof aiLanguages)[number]);
+  const getSavedKeyMask = (provider: AiProvider | null, currentSettings: AiSettingsPayload | null) => {
+    if (provider === "openai") return currentSettings?.openai_key ?? null;
+    if (provider === "gemini") return currentSettings?.gemini_key ?? null;
+    return null;
+  };
+  const providerLabel = (provider: AiProvider) => (provider === "openai" ? "OpenAI" : "Gemini");
+  const selectedProvider = settings?.provider ?? null;
+  const compatibleModelOptions = selectedProvider
+    ? modelOptions.filter((option) => option.provider === selectedProvider)
+    : modelOptions;
+
+  const updatePreset = async (presetValue: string) => {
+    if (!isAiPreset(presetValue)) {
+      showErr("Unsupported AI preset.");
+      return;
+    }
+    const preset = presetValue;
+    const provider = settings?.provider ?? null;
+    const targetLanguage = settings?.target_language ?? null;
+    
+    let warning = null;
+    if (requiresProvider(preset) && !provider) {
+      warning = "Remember to select an AI provider.";
+    } else if (provider && requiresProvider(preset) && !getSavedKeyMask(provider, settings)) {
+      warning = `Remember to save a${provider === "openai" ? "n" : ""} ${providerLabel(provider)} API key.`;
+    } else if (requiresTargetLanguage(preset) && !targetLanguage) {
+      warning = "Remember to select a target language.";
+    }
+
+    setSettings((s) => (s ? { ...s, preset } : null));
+    setBusy(true);
+    try {
+      await invoke("set_ai_preset", { preset });
+      await refresh();
+      if (warning) {
+         showInfo(warning);
+      } else {
+         showOk("AI preset updated.");
+      }
+    } catch (e) {
+      showErr(`Failed to update AI preset: ${String(e)}`);
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateProvider = async (providerValue: string | null) => {
+    if (providerValue != null && !isAiProvider(providerValue)) {
+      showErr("Unsupported AI provider.");
+      return;
+    }
+    const provider = providerValue;
+    
+    let warning = null;
+    if (!provider && settings != null && requiresProvider(settings.preset)) {
+      warning = "Remember to select Raw mode if you don't want AI processing.";
+    } else if (provider && settings != null && requiresProvider(settings.preset) && !getSavedKeyMask(provider, settings)) {
+      warning = `Remember to save a${provider === "openai" ? "n" : ""} ${providerLabel(provider)} API key.`;
+    }
+
+    setSettings((s) => (s ? { ...s, provider } : null));
+    setBusy(true);
+    try {
+      await invoke("set_ai_provider", { provider });
+      await refresh();
+      if (warning) showInfo(warning);
+      else showOk("AI provider updated.");
+    } catch (e) {
+      showErr(`Failed to update AI provider: ${String(e)}`);
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateModel = async (modelValue: string) => {
+    if (!isAiModel(modelValue)) {
+      showErr("Unsupported AI model.");
+      return;
+    }
+    const model = modelValue;
+    const provider = modelOptions.find((option) => option.value === model)?.provider ?? null;
+
+    setSettings((s) => (s ? { ...s, provider, model } : null));
+    setBusy(true);
+    try {
+      await invoke("set_ai_model", { model });
+      await refresh();
+      showOk("AI model updated.");
+    } catch (e) {
+      showErr(`Failed to update AI model: ${String(e)}`);
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateTargetLanguage = async (language: AiSettingsPayload["target_language"]) => {
+    const nextLanguage = language?.trim() || null;
+    if (nextLanguage && !isSupportedLanguage(nextLanguage)) {
+      showErr("Unsupported target language.");
+      return;
+    }
+    
+    let warning = null;
+    if (!nextLanguage && settings != null && requiresTargetLanguage(settings.preset)) {
+      warning = "Remember to select a target language for translation.";
+    }
+
+    setSettings((s) => (s ? { ...s, target_language: nextLanguage } : null));
+    setBusy(true);
+    try {
+      await invoke("set_ai_target_language", { language: nextLanguage });
+      await refresh();
+      if (warning) showInfo(warning);
+      else showOk("Target language updated.");
+    } catch (e) {
+      showErr(`Failed to update target language: ${String(e)}`);
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveOpenAiKey = async () => {
+    const token = openAiInput.trim();
+    if (!token) return;
+    setBusy(true);
+    try {
+      await invoke("set_openai_api_key", { token });
+      setOpenAiInput("");
+      await refresh();
+      showOk("OpenAI key saved.");
+    } catch (e) {
+      showErr(`Failed to save OpenAI key: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveGeminiKey = async () => {
+    const token = geminiInput.trim();
+    if (!token) return;
+    setBusy(true);
+    try {
+      await invoke("set_gemini_api_key", { token });
+      setGeminiInput("");
+      await refresh();
+      showOk("Gemini key saved.");
+    } catch (e) {
+      showErr(`Failed to save Gemini key: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteOpenAiKey = async () => {
+    setBusy(true);
+    try {
+      await invoke("set_openai_api_key", { token: null });
+      setOpenAiInput("");
+      await refresh();
+      showOk("OpenAI key deleted.");
+    } catch (e) {
+      showErr(`Failed to delete OpenAI key: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteGeminiKey = async () => {
+    setBusy(true);
+    try {
+      await invoke("set_gemini_api_key", { token: null });
+      setGeminiInput("");
+      await refresh();
+      showOk("Gemini key deleted.");
+    } catch (e) {
+      showErr(`Failed to delete Gemini key: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const preset = settings?.preset ?? "raw";
+  const loading = settings === null;
+  const controlsDisabled = busy || loading;
+  const translationEnabled = requiresTargetLanguage(preset);
+  const openAiKeyDraft = openAiInput.trim();
+  const geminiKeyDraft = geminiInput.trim();
+  const openAiKeyMask = settings?.openai_key;
+  const geminiKeyMask = settings?.gemini_key;
+
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="AI" subtitle="Optional transcript cleanup and translation before paste." />
+      <SettingsSection title="Processing">
+        <SettingsRow label="Preset" hint="Raw stays fully local. Other modes send transcript text to your selected provider.">
+          <ChoiceGroup>
+            {presetOptions.map((option) => (
+              <ChoiceButton
+                key={option.value}
+                active={preset === option.value}
+                onClick={() => void updatePreset(option.value)}
+                disabled={controlsDisabled}
+              >
+                {option.label}
+              </ChoiceButton>
+            ))}
+          </ChoiceGroup>
+        </SettingsRow>
+        <SettingsRow label="Provider" hint="Only used when preset is not Raw.">
+          <ChoiceGroup compact>
+            <ChoiceButton
+              active={(settings?.provider ?? null) === null}
+              onClick={() => void updateProvider(null)}
+              disabled={controlsDisabled}
+            >
+              None
+            </ChoiceButton>
+            {providerOptions.map((option) => (
+              <ChoiceButton
+                key={option.value}
+                active={settings?.provider === option.value}
+                onClick={() => void updateProvider(option.value)}
+                disabled={controlsDisabled}
+              >
+                {option.label}
+              </ChoiceButton>
+            ))}
+          </ChoiceGroup>
+        </SettingsRow>
+        <SettingsRow label="Model" hint={selectedProvider ? "Used for cleanup and translation with the selected provider." : "Choose a provider first, or pick any model to set it automatically."}>
+          <ChoiceGroup>
+            {compatibleModelOptions.map((option) => (
+              <ChoiceButton
+                key={option.value}
+                active={settings?.model === option.value}
+                onClick={() => void updateModel(option.value)}
+                disabled={controlsDisabled}
+              >
+                {option.label}
+              </ChoiceButton>
+            ))}
+          </ChoiceGroup>
+        </SettingsRow>
+        <SettingsRow
+          label="Target language"
+          hint={translationEnabled ? "Required for translation presets." : "Optional until you enable translation."}
+        >
+          <ChoiceGroup compact>
+            <ChoiceButton
+              active={(settings?.target_language ?? null) === null}
+              onClick={() => void updateTargetLanguage(null)}
+              disabled={controlsDisabled}
+            >
+              None
+            </ChoiceButton>
+            {aiLanguages.map((language) => (
+              <ChoiceButton
+                key={language}
+                active={settings?.target_language === language}
+                onClick={() => void updateTargetLanguage(language)}
+                disabled={controlsDisabled}
+              >
+                {language}
+              </ChoiceButton>
+            ))}
+          </ChoiceGroup>
+        </SettingsRow>
+        <SettingsRow label="Privacy" hint="AI presets send transcript text only. Audio stays local." last>
+          <StatusBadge tone={preset === "raw" ? "ok" : "warn"}>
+            {preset === "raw" ? "Local only" : "Transcript sent to provider"}
+          </StatusBadge>
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title="Provider keys">
+        <SettingsRow
+          label="OpenAI key"
+          hint={openAiKeyMask ? `Saved mask: ${openAiKeyMask}` : "No key saved yet."}
+        >
+          <div className="wv-inline wv-inline-stack wv-input-stack">
+            <input
+              className="wv-input"
+              type="password"
+              value={openAiInput}
+              onChange={(e) => setOpenAiInput(e.target.value)}
+              placeholder="sk-..."
+              disabled={loading}
+            />
+            <div className="wv-inline wv-action-row">
+              <Button onClick={() => void saveOpenAiKey()} disabled={controlsDisabled || openAiKeyDraft.length === 0}>Save</Button>
+              <Button variant="danger" onClick={() => void deleteOpenAiKey()} disabled={controlsDisabled || openAiKeyMask == null}>Delete</Button>
+            </div>
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          label="Gemini key"
+          hint={geminiKeyMask ? `Saved mask: ${geminiKeyMask}` : "No key saved yet."}
+          last
+        >
+          <div className="wv-inline wv-inline-stack wv-input-stack">
+            <input
+              className="wv-input"
+              type="password"
+              value={geminiInput}
+              onChange={(e) => setGeminiInput(e.target.value)}
+              placeholder="AIza..."
+              disabled={loading}
+            />
+            <div className="wv-inline wv-action-row">
+              <Button onClick={() => void saveGeminiKey()} disabled={controlsDisabled || geminiKeyDraft.length === 0}>Save</Button>
+              <Button variant="danger" onClick={() => void deleteGeminiKey()} disabled={controlsDisabled || geminiKeyMask == null}>Delete</Button>
+            </div>
+          </div>
         </SettingsRow>
       </SettingsSection>
     </div>

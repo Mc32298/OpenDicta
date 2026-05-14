@@ -35,7 +35,15 @@
       "Bash(bash *)",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(Get-ChildItem -Path src -Directory -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -ExpandProperty Name)",
+      "Bash(Get-ChildItem -Recurse -Filter \"Settings.tsx\" -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(node -e \"import\\('./src/lib/shortcutUtils.ts'\\).then\\(m => console.log\\(Object.keys\\(m\\)\\)\\).catch\\(e => console.log\\('Error:', e.message\\)\\)\")",
+      "Bash(cat)",
+      "Bash(npx tsx *)",
+      "PowerShell(\\(Get-Content \"C:\\\\Users\\\\MathiasNielsen-SPINO\\\\Downloads\\\\Projects\\\\VoiceNote_V5\\\\voicenote\\\\src-tauri\\\\src\\\\lib.rs\" | Measure-Object -Line\\).Lines)"
     ],
     "additionalDirectories": [
       "C:\\Users\\MathiasNielsen-SPINO\\AppData\\Roaming\\com.voicenote.app\\models\\parakeet"

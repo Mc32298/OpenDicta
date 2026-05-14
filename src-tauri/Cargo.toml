@@ -46,4 +46,4 @@ rubato = "0.16"
 keyring = "3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Security_Cryptography", "Win32_System_Memory"] }

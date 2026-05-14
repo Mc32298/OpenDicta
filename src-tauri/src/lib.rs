@@ -8,6 +8,9 @@
 //!   - voicenote-worker sidecar management (Parakeet TDT 0.6B v3 via sherpa-onnx)
 //!   - Auto-paste via enigo (types text into the active app)
 
+mod ai;
+
+use ai::{AiConfig, AiModel, AiPreset, AiProvider, TransformError};
 use std::io::Write;
 use std::path::Path;
 use rubato::{
@@ -25,6 +28,13 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::LocalFree,
+    Security::Cryptography::{
+        CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
+    },
+};
 
 const DEFAULT_SHORTCUT: &str = "ControlRight";
 
@@ -104,6 +114,13 @@ struct AppState {
     /// True once onboarding has been completed by the user.
     onboarding_completed: Arc<AtomicBool>,
     completion_sound: Arc<AtomicBool>,
+    ai_preset: Arc<Mutex<String>>,
+    ai_provider: Arc<Mutex<Option<String>>>,
+    ai_model: Arc<Mutex<Option<String>>>,
+    ai_target_language: Arc<Mutex<Option<String>>>,
+    openai_api_key: Arc<Mutex<Option<String>>>,
+    gemini_api_key: Arc<Mutex<Option<String>>>,
+    http_client: reqwest::Client,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -147,6 +164,16 @@ impl AppState {
             hf_token: Arc::new(Mutex::new(None)),
             onboarding_completed: Arc::new(AtomicBool::new(false)),
             completion_sound: Arc::new(AtomicBool::new(false)),
+            ai_preset: Arc::new(Mutex::new("raw".to_string())),
+            ai_provider: Arc::new(Mutex::new(None)),
+            ai_model: Arc::new(Mutex::new(None)),
+            ai_target_language: Arc::new(Mutex::new(None)),
+            openai_api_key: Arc::new(Mutex::new(None)),
+            gemini_api_key: Arc::new(Mutex::new(None)),
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(12))
+                .build()
+                .expect("failed to build shared HTTP client"),
         }
     }
 }
@@ -290,6 +317,14 @@ struct AppSettings {
     onboarding_completed: bool,
     #[serde(default)]
     completion_sound: bool,
+    #[serde(default = "default_ai_preset")]
+    ai_preset: String,
+    #[serde(default)]
+    ai_provider: Option<String>,
+    #[serde(default)]
+    ai_model: Option<String>,
+    #[serde(default)]
+    ai_target_language: Option<String>,
 }
 
 fn default_waveform_color() -> String {
@@ -310,6 +345,10 @@ fn default_runtime_profile() -> String {
 
 fn default_onnx_provider() -> String {
     "cpu".to_string()
+}
+
+fn default_ai_preset() -> String {
+    "raw".to_string()
 }
 
 #[tauri::command]
@@ -412,6 +451,133 @@ async fn set_onnx_provider(
 #[tauri::command]
 async fn get_hf_token(state: tauri::State<'_, SharedState>) -> Result<Option<String>, String> {
     Ok(state.hf_token.lock().unwrap().as_ref().map(|t| mask_token(t)))
+}
+
+#[derive(Clone, serde::Serialize)]
+struct AiSettingsPayload {
+    preset: String,
+    provider: Option<String>,
+    model: Option<String>,
+    target_language: Option<String>,
+    openai_key: Option<String>,
+    gemini_key: Option<String>,
+}
+
+#[tauri::command]
+async fn get_ai_settings(state: tauri::State<'_, SharedState>) -> Result<AiSettingsPayload, String> {
+    Ok(AiSettingsPayload {
+        preset: state.ai_preset.lock().unwrap().clone(),
+        provider: state.ai_provider.lock().unwrap().clone(),
+        model: state.ai_model.lock().unwrap().clone(),
+        target_language: state.ai_target_language.lock().unwrap().clone(),
+        openai_key: state
+            .openai_api_key
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(mask_token),
+        gemini_key: state
+            .gemini_api_key
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(mask_token),
+    })
+}
+
+#[tauri::command]
+async fn set_ai_preset(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    preset: String,
+) -> Result<(), String> {
+    let preset = preset.trim().to_lowercase();
+    AiPreset::from_settings_value(&preset)
+        .ok_or_else(|| "Unsupported AI preset".to_string())?;
+    *state.ai_preset.lock().unwrap() = preset;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_ai_provider(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    provider: Option<String>,
+) -> Result<(), String> {
+    let provider = provider
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty());
+    if let Some(ref value) = provider {
+        AiProvider::from_settings_value(value)
+            .ok_or_else(|| "Unsupported AI provider".to_string())?;
+    }
+    let next_model = provider.as_deref().and_then(AiProvider::from_settings_value).map(|provider| {
+        let current = state.ai_model.lock().unwrap().clone();
+        current
+            .and_then(|value| AiModel::from_settings_value(&value))
+            .filter(|model| model.provider() == provider)
+            .unwrap_or_else(|| AiModel::default_for_provider(provider))
+            .as_settings_value()
+            .to_string()
+    });
+    *state.ai_provider.lock().unwrap() = provider;
+    *state.ai_model.lock().unwrap() = next_model;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_ai_model(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    model: String,
+) -> Result<(), String> {
+    let model = model.trim().to_lowercase();
+    let model = AiModel::from_settings_value(&model)
+        .ok_or_else(|| "Unsupported AI model".to_string())?;
+    *state.ai_provider.lock().unwrap() = Some(model.provider().as_settings_value().to_string());
+    *state.ai_model.lock().unwrap() = Some(model.as_settings_value().to_string());
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_ai_target_language(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    language: Option<String>,
+) -> Result<(), String> {
+    let language = language
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    *state.ai_target_language.lock().unwrap() = language;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_openai_api_key(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    token: Option<String>,
+) -> Result<(), String> {
+    let token = token
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    save_ai_secret(&app, "openai_api_key", openai_keyring_entry(), token.as_deref())?;
+    *state.openai_api_key.lock().unwrap() = token;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_gemini_api_key(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    token: Option<String>,
+) -> Result<(), String> {
+    let token = token
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    save_ai_secret(&app, "gemini_api_key", gemini_keyring_entry(), token.as_deref())?;
+    *state.gemini_api_key.lock().unwrap() = token;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1042,6 +1208,10 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         hf_token: None,
         onboarding_completed: state.onboarding_completed.load(Ordering::SeqCst),
         completion_sound: state.completion_sound.load(Ordering::SeqCst),
+        ai_preset: state.ai_preset.lock().unwrap().clone(),
+        ai_provider: state.ai_provider.lock().unwrap().clone(),
+        ai_model: state.ai_model.lock().unwrap().clone(),
+        ai_target_language: state.ai_target_language.lock().unwrap().clone(),
     };
     let payload = serde_json::to_string(&settings)
         .map_err(|e| format!("Failed to serialize app settings: {}", e))?;
@@ -1069,8 +1239,16 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     *state.asr_backend.lock().unwrap() = settings.asr_backend;
     *state.runtime_profile.lock().unwrap() = settings.runtime_profile;
     *state.onnx_provider.lock().unwrap() = settings.onnx_provider;
+    *state.ai_preset.lock().unwrap() = settings.ai_preset;
+    *state.ai_provider.lock().unwrap() = settings.ai_provider;
+    *state.ai_model.lock().unwrap() = settings.ai_model;
+    *state.ai_target_language.lock().unwrap() = settings.ai_target_language;
     let keyring_token = load_hf_token_secret();
     *state.hf_token.lock().unwrap() = keyring_token.clone().or(settings.hf_token.clone());
+    *state.openai_api_key.lock().unwrap() =
+        load_ai_secret(app, "openai_api_key", openai_keyring_entry());
+    *state.gemini_api_key.lock().unwrap() =
+        load_ai_secret(app, "gemini_api_key", gemini_keyring_entry());
     if keyring_token.is_none() {
         if let Some(legacy) = settings.hf_token.as_deref() {
             if !legacy.trim().is_empty() {
@@ -1098,8 +1276,134 @@ fn hf_token_keyring_entry() -> Result<keyring::Entry, String> {
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
-fn load_hf_token_secret() -> Option<String> {
-    let entry = hf_token_keyring_entry().ok()?;
+fn openai_keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new("com.voicenote.app", "openai_api_key")
+        .map_err(|e| format!("Keyring initialization failed: {}", e))
+}
+
+fn gemini_keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new("com.voicenote.app", "gemini_api_key")
+        .map_err(|e| format!("Keyring initialization failed: {}", e))
+}
+
+fn ai_secret_file_path(app: &AppHandle, key: &str) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Failed to resolve app config dir: {}", e))?
+        .join("secrets");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create secrets dir: {}", e))?;
+    Ok(dir.join(format!("{key}.bin")))
+}
+
+#[cfg(windows)]
+fn protect_local_secret(plain: &[u8]) -> Result<Vec<u8>, String> {
+    if plain.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut input = CRYPT_INTEGER_BLOB {
+        cbData: plain.len() as u32,
+        pbData: plain.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+    let ok = unsafe {
+        CryptProtectData(
+            &mut input,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "Failed to encrypt local secret: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let bytes =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        LocalFree(output.pbData.cast());
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn unprotect_local_secret(cipher: &[u8]) -> Result<Vec<u8>, String> {
+    if cipher.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut input = CRYPT_INTEGER_BLOB {
+        cbData: cipher.len() as u32,
+        pbData: cipher.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+    let ok = unsafe {
+        CryptUnprotectData(
+            &mut input,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "Failed to decrypt local secret: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let bytes =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        LocalFree(output.pbData.cast());
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn save_local_encrypted_secret(path: &Path, value: Option<&str>) -> Result<(), String> {
+    match value {
+        Some(secret) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create secret directory: {}", e))?;
+            }
+            let payload = protect_local_secret(secret.as_bytes())?;
+            std::fs::write(path, payload)
+                .map_err(|e| format!("Failed to write encrypted secret: {}", e))
+        }
+        None => match std::fs::remove_file(path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to delete encrypted secret: {}", e)),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn load_local_encrypted_secret(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let plain = unprotect_local_secret(&bytes).ok()?;
+    let secret = String::from_utf8(plain).ok()?;
+    let trimmed = secret.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+
+fn load_secret(entry: Result<keyring::Entry, String>) -> Option<String> {
+    let entry = entry.ok()?;
     match entry.get_password() {
         Ok(value) => {
             let trimmed = value.trim().to_string();
@@ -1109,11 +1413,11 @@ fn load_hf_token_secret() -> Option<String> {
     }
 }
 
-fn save_hf_token_secret(token: Option<&str>) -> Result<(), String> {
-    let entry = hf_token_keyring_entry()?;
-    match token {
-        Some(value) => entry
-            .set_password(value)
+fn save_secret(entry: Result<keyring::Entry, String>, value: Option<&str>) -> Result<(), String> {
+    let entry = entry?;
+    match value {
+        Some(secret) => entry
+            .set_password(secret)
             .map_err(|e| format!("Failed to save token in keyring: {}", e)),
         None => match entry.delete_credential() {
             Ok(_) => Ok(()),
@@ -1121,6 +1425,68 @@ fn save_hf_token_secret(token: Option<&str>) -> Result<(), String> {
             Err(e) => Err(format!("Failed to delete token from keyring: {}", e)),
         },
     }
+}
+
+fn save_ai_secret(
+    app: &AppHandle,
+    key: &str,
+    entry: Result<keyring::Entry, String>,
+    value: Option<&str>,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let path = ai_secret_file_path(app, key)?;
+        save_local_encrypted_secret(&path, value)?;
+        let _ = save_secret(entry, None);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        let _ = key;
+        save_secret(entry, value)
+    }
+}
+
+fn load_ai_secret(
+    app: &AppHandle,
+    key: &str,
+    entry: Result<keyring::Entry, String>,
+) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let path = ai_secret_file_path(app, key).ok()?;
+        if let Some(secret) = load_local_encrypted_secret(&path) {
+            return Some(secret);
+        }
+        let legacy = load_secret(entry);
+        if let Some(ref value) = legacy {
+            let _ = save_local_encrypted_secret(&path, Some(value));
+            let _ = save_secret(
+                match key {
+                    "openai_api_key" => openai_keyring_entry(),
+                    "gemini_api_key" => gemini_keyring_entry(),
+                    _ => return legacy,
+                },
+                None,
+            );
+        }
+        legacy
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        let _ = key;
+        load_secret(entry)
+    }
+}
+
+fn load_hf_token_secret() -> Option<String> {
+    load_secret(hf_token_keyring_entry())
+}
+
+fn save_hf_token_secret(token: Option<&str>) -> Result<(), String> {
+    save_secret(hf_token_keyring_entry(), token)
 }
 
 fn mask_token(token: &str) -> String {
@@ -1664,6 +2030,58 @@ fn worker_binary_path() -> std::path::PathBuf {
     std::path::PathBuf::from(bin_name)
 }
 
+fn current_ai_config(state: &SharedState) -> AiConfig {
+    let preset = state.ai_preset.lock().unwrap().clone();
+    let provider = state
+        .ai_provider
+        .lock()
+        .unwrap()
+        .clone()
+        .and_then(|value| AiProvider::from_settings_value(&value));
+    let model = state
+        .ai_model
+        .lock()
+        .unwrap()
+        .clone()
+        .and_then(|value| AiModel::from_settings_value(&value));
+    let target_language = state.ai_target_language.lock().unwrap().clone();
+    AiConfig {
+        preset: AiPreset::from_settings_value(&preset).unwrap_or(AiPreset::Raw),
+        provider,
+        model,
+        target_language,
+    }
+}
+
+fn current_provider_key(state: &SharedState, provider: AiProvider) -> Option<String> {
+    match provider {
+        AiProvider::OpenAi => state.openai_api_key.lock().unwrap().clone(),
+        AiProvider::Gemini => state.gemini_api_key.lock().unwrap().clone(),
+    }
+}
+
+async fn transform_transcript_if_enabled(
+    state: SharedState,
+    transcript: String,
+) -> Result<String, TransformError> {
+    let config = current_ai_config(&state);
+    let provider = config.provider;
+    let api_key = provider.and_then(|value| current_provider_key(&state, value));
+    let request = match ai::validate_transform_input(&config, &transcript, api_key.as_deref())? {
+        Some(request) => request,
+        None => return Ok(transcript),
+    };
+    ai::transform_with_provider(&state.http_client, &request).await
+}
+
+fn finish_transcript_request(state: &SharedState) {
+    state.sidecar_busy.store(false, Ordering::SeqCst);
+    state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
+    if let Some(path) = state.last_wav_path.lock().unwrap().take() {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 fn spawn_sidecar(app: AppHandle, state: SharedState) {
     // Atomically claim the spawn slot. If another thread already claimed it, bail.
     if state.sidecar_spawning
@@ -1795,25 +2213,44 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     }
                     println!("Transcript: {}", transcript);
 
-                    // Auto-paste the transcript into the previously active app
-                    paste_text(&transcript);
+                    let transcript_for_transform = transcript.clone();
+                    let transcript_for_ui = transcript.clone();
+                    let transcript_fallback = transcript.clone();
+                    let app_for_transform = app_stdout.clone();
+                    let state_for_transform = state_for_stdout.clone();
 
-                    // Notify the Voice Bar UI
-                    app_stdout
-                        .emit(
-                            "transcript-ready",
-                            serde_json::json!({"text": transcript}),
+                    tauri::async_runtime::spawn(async move {
+                        match transform_transcript_if_enabled(
+                            state_for_transform.clone(),
+                            transcript_for_transform,
                         )
-                        .ok();
-                    state_for_stdout
-                        .sidecar_busy
-                        .store(false, Ordering::SeqCst);
-                    state_for_stdout
-                        .sidecar_last_used_ms
-                        .store(now_millis(), Ordering::SeqCst);
-                    if let Some(path) = state_for_stdout.last_wav_path.lock().unwrap().take() {
-                        let _ = std::fs::remove_file(&path);
-                    }
+                        .await
+                        {
+                            Ok(final_text) => {
+                                paste_text(&final_text);
+                                let _ = app_for_transform.emit(
+                                    "transcript-ready",
+                                    serde_json::json!({ "text": final_text }),
+                                );
+                                finish_transcript_request(&state_for_transform);
+                            }
+                            Err(err) => {
+                                eprintln!("AI post-process failed: {:?}", err);
+                                paste_text(&transcript_fallback);
+                                let _ = app_for_transform.emit(
+                                    "transcription-error",
+                                    serde_json::json!({
+                                        "message": format!("AI post-processing failed: {:?}", err)
+                                    }),
+                                );
+                                let _ = app_for_transform.emit(
+                                    "transcript-ready",
+                                    serde_json::json!({ "text": transcript_for_ui }),
+                                );
+                                finish_transcript_request(&state_for_transform);
+                            }
+                        }
+                    });
                 }
                 Ok(other) => {
                     // Ignore non-protocol stdout noise from dependencies.
@@ -2159,6 +2596,13 @@ pub fn run() {
             get_onnx_provider,
             get_provider_runtime_status,
             set_onnx_provider,
+            get_ai_settings,
+            set_ai_preset,
+            set_ai_provider,
+            set_ai_model,
+            set_ai_target_language,
+            set_openai_api_key,
+            set_gemini_api_key,
             get_hf_token,
             set_hf_token,
             get_voicebar_visible,
@@ -2295,4 +2739,100 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("Error running VoiceNote");
+}
+
+#[cfg(test)]
+mod ai_settings_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn default_ai_preset_is_raw() {
+        assert_eq!(default_ai_preset(), "raw");
+    }
+
+    #[test]
+    fn ai_provider_validation_accepts_supported_values() {
+        assert!(AiProvider::from_settings_value("openai").is_some());
+        assert!(AiProvider::from_settings_value("gemini").is_some());
+        assert!(AiProvider::from_settings_value("other").is_none());
+    }
+
+    #[test]
+    fn current_ai_config_reads_state_values() {
+        let state: SharedState = Arc::new(AppState::new());
+        *state.ai_preset.lock().unwrap() = "clean_translate".to_string();
+        *state.ai_provider.lock().unwrap() = Some("gemini".to_string());
+        *state.ai_model.lock().unwrap() = Some("gemini-3-flash-preview".to_string());
+        *state.ai_target_language.lock().unwrap() = Some("Danish".to_string());
+
+        let config = current_ai_config(&state);
+
+        assert_eq!(config.preset, AiPreset::CleanTranslate);
+        assert_eq!(config.provider, Some(AiProvider::Gemini));
+        assert_eq!(config.model, Some(ai::AiModel::Gemini3FlashPreview));
+        assert_eq!(config.target_language.as_deref(), Some("Danish"));
+    }
+
+    #[test]
+    fn current_provider_key_reads_only_selected_provider() {
+        let state: SharedState = Arc::new(AppState::new());
+        *state.openai_api_key.lock().unwrap() = Some("openai-key".to_string());
+        *state.gemini_api_key.lock().unwrap() = Some("gemini-key".to_string());
+
+        assert_eq!(
+            current_provider_key(&state, AiProvider::OpenAi).as_deref(),
+            Some("openai-key")
+        );
+        assert_eq!(
+            current_provider_key(&state, AiProvider::Gemini).as_deref(),
+            Some("gemini-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn transform_transcript_if_enabled_returns_raw_transcript_when_disabled() {
+        let state: SharedState = Arc::new(AppState::new());
+
+        let result = transform_transcript_if_enabled(state, "hej verden".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(result, "hej verden");
+    }
+
+    #[test]
+    fn finish_transcript_request_clears_busy_and_cleans_up_wav_path() {
+        let state: SharedState = Arc::new(AppState::new());
+        state.sidecar_busy.store(true, Ordering::SeqCst);
+        state.sidecar_last_used_ms.store(0, Ordering::SeqCst);
+        *state.last_wav_path.lock().unwrap() =
+            Some(std::path::PathBuf::from("nonexistent-test-audio.wav"));
+
+        finish_transcript_request(&state);
+
+        assert!(!state.sidecar_busy.load(Ordering::SeqCst));
+        assert!(state.sidecar_last_used_ms.load(Ordering::SeqCst) > 0);
+        assert!(state.last_wav_path.lock().unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn local_ai_secret_round_trips_and_deletes() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("voicenote-secret-test-{unique}"));
+        let path = base.join("openai_api_key.bin");
+
+        save_local_encrypted_secret(&path, Some("sk-test-secret")).unwrap();
+        assert_eq!(
+            load_local_encrypted_secret(&path).as_deref(),
+            Some("sk-test-secret")
+        );
+
+        save_local_encrypted_secret(&path, None).unwrap();
+        assert_eq!(load_local_encrypted_secret(&path), None);
+    }
 }
