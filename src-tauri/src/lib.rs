@@ -104,6 +104,16 @@ struct AppState {
     /// True once onboarding has been completed by the user.
     onboarding_completed: Arc<AtomicBool>,
     completion_sound: Arc<AtomicBool>,
+    /// AI backend: "openai" | "anthropic" | "ollama"
+    ai_backend: Arc<Mutex<String>>,
+    /// AI model name, e.g. "gpt-4o-mini"
+    ai_model: Arc<Mutex<String>>,
+    /// Ollama base URL, e.g. "http://localhost:11434"
+    ai_ollama_url: Arc<Mutex<String>>,
+    /// Map of profile_id → assigned hotkey string
+    profile_hotkeys: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    /// Profile currently being applied (set on profile hotkey press, cleared after paste)
+    active_profile: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -147,6 +157,11 @@ impl AppState {
             hf_token: Arc::new(Mutex::new(None)),
             onboarding_completed: Arc::new(AtomicBool::new(false)),
             completion_sound: Arc::new(AtomicBool::new(false)),
+            ai_backend: Arc::new(Mutex::new("openai".to_string())),
+            ai_model: Arc::new(Mutex::new("gpt-4o-mini".to_string())),
+            ai_ollama_url: Arc::new(Mutex::new("http://localhost:11434".to_string())),
+            profile_hotkeys: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            active_profile: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -290,6 +305,14 @@ struct AppSettings {
     onboarding_completed: bool,
     #[serde(default)]
     completion_sound: bool,
+    #[serde(default = "default_ai_backend")]
+    ai_backend: String,
+    #[serde(default = "default_ai_model")]
+    ai_model: String,
+    #[serde(default = "default_ai_ollama_url")]
+    ai_ollama_url: String,
+    #[serde(default)]
+    profile_hotkeys: std::collections::HashMap<String, String>,
 }
 
 fn default_waveform_color() -> String {
@@ -310,6 +333,18 @@ fn default_runtime_profile() -> String {
 
 fn default_onnx_provider() -> String {
     "cpu".to_string()
+}
+
+fn default_ai_backend() -> String {
+    "openai".to_string()
+}
+
+fn default_ai_model() -> String {
+    "gpt-4o-mini".to_string()
+}
+
+fn default_ai_ollama_url() -> String {
+    "http://localhost:11434".to_string()
 }
 
 #[tauri::command]
@@ -1045,6 +1080,10 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         hf_token: None,
         onboarding_completed: state.onboarding_completed.load(Ordering::SeqCst),
         completion_sound: state.completion_sound.load(Ordering::SeqCst),
+        ai_backend: state.ai_backend.lock().unwrap().clone(),
+        ai_model: state.ai_model.lock().unwrap().clone(),
+        ai_ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
+        profile_hotkeys: state.profile_hotkeys.lock().unwrap().clone(),
     };
     let payload = serde_json::to_string(&settings)
         .map_err(|e| format!("Failed to serialize app settings: {}", e))?;
@@ -1087,6 +1126,10 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
         .onboarding_completed
         .store(settings.onboarding_completed, Ordering::SeqCst);
     state.completion_sound.store(settings.completion_sound, Ordering::SeqCst);
+    *state.ai_backend.lock().unwrap() = settings.ai_backend;
+    *state.ai_model.lock().unwrap() = settings.ai_model;
+    *state.ai_ollama_url.lock().unwrap() = settings.ai_ollama_url;
+    *state.profile_hotkeys.lock().unwrap() = settings.profile_hotkeys;
     {
         let provider = state.onnx_provider.lock().unwrap().clone();
         let mut rt = state.provider_runtime.lock().unwrap();
