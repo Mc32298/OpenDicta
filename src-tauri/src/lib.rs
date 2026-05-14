@@ -183,6 +183,191 @@ fn idle_timeout_ms(profile: &str) -> u64 {
 
 type SharedState = Arc<AppState>;
 
+// ─── AI Profiles ──────────────────────────────────────────────────────────────
+
+struct Profile {
+    id: &'static str,
+    name: &'static str,
+    system_prompt: &'static str,
+}
+
+const PROFILES: &[Profile] = &[
+    Profile {
+        id: "fix_grammar",
+        name: "Fix Grammar",
+        system_prompt: "Fix grammar and punctuation. Preserve meaning and tone. Return only the corrected text, no explanation.",
+    },
+    Profile {
+        id: "bullet_points",
+        name: "Bullet Points",
+        system_prompt: "Convert to a concise bulleted list. Return only the list, no preamble.",
+    },
+    Profile {
+        id: "email_draft",
+        name: "Email Draft",
+        system_prompt: "Format as a professional email with an appropriate greeting and closing. Return only the email.",
+    },
+    Profile {
+        id: "make_formal",
+        name: "Make Formal",
+        system_prompt: "Rewrite in formal, professional language. Return only the rewritten text.",
+    },
+    Profile {
+        id: "summarize",
+        name: "Summarize",
+        system_prompt: "Summarize in 1-2 sentences. Return only the summary.",
+    },
+];
+
+#[derive(serde::Serialize)]
+struct ProfileInfo {
+    id: String,
+    name: String,
+    hotkey: Option<String>,
+}
+
+#[tauri::command]
+async fn get_profiles(state: tauri::State<'_, SharedState>) -> Result<Vec<ProfileInfo>, String> {
+    let hotkeys = state.profile_hotkeys.lock().unwrap().clone();
+    Ok(PROFILES
+        .iter()
+        .map(|p| ProfileInfo {
+            id: p.id.to_string(),
+            name: p.name.to_string(),
+            hotkey: hotkeys.get(p.id).cloned(),
+        })
+        .collect())
+}
+
+// ─── AI Settings Commands ─────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct AiSettingsInfo {
+    backend: String,
+    model: String,
+    api_key_masked: String,
+    ollama_url: String,
+    profile_hotkeys: std::collections::HashMap<String, String>,
+}
+
+#[tauri::command]
+async fn get_ai_settings(state: tauri::State<'_, SharedState>) -> Result<AiSettingsInfo, String> {
+    let raw_key = keyring::Entry::new("voicenote", "ai_api_key")
+        .ok()
+        .and_then(|e| e.get_password().ok())
+        .unwrap_or_default();
+    Ok(AiSettingsInfo {
+        backend: state.ai_backend.lock().unwrap().clone(),
+        model: state.ai_model.lock().unwrap().clone(),
+        api_key_masked: mask_token(&raw_key),
+        ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
+        profile_hotkeys: state.profile_hotkeys.lock().unwrap().clone(),
+    })
+}
+
+#[tauri::command]
+async fn set_ai_backend(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    backend: String,
+) -> Result<(), String> {
+    const VALID: &[&str] = &["openai", "anthropic", "ollama"];
+    if !VALID.contains(&backend.as_str()) {
+        return Err(format!("Unknown AI backend: {}", backend));
+    }
+    *state.ai_backend.lock().unwrap() = backend;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_ai_api_key(key: String) -> Result<(), String> {
+    let entry = keyring::Entry::new("voicenote", "ai_api_key").map_err(|e| e.to_string())?;
+    if key.is_empty() {
+        entry.delete_credential().or_else(|e| match e {
+            keyring::Error::NoEntry => Ok(()),
+            other => Err(other.to_string()),
+        })
+    } else {
+        entry.set_password(&key).map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+async fn set_ai_model(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    model: String,
+) -> Result<(), String> {
+    let model = model.trim().to_string();
+    if model.is_empty() || model.len() > 64 {
+        return Err("Invalid model name".to_string());
+    }
+    *state.ai_model.lock().unwrap() = model;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_ai_ollama_url(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    url: String,
+) -> Result<(), String> {
+    let url = url.trim().to_string();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("URL must start with http:// or https://".to_string());
+    }
+    *state.ai_ollama_url.lock().unwrap() = url;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_profile_hotkey(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    profile_id: String,
+    hotkey: Option<String>,
+) -> Result<(), String> {
+    // Validate profile_id against hardcoded list
+    if !PROFILES.iter().any(|p| p.id == profile_id) {
+        return Err(format!("Unknown profile: {}", profile_id));
+    }
+    let main_shortcut = state.shortcut.lock().unwrap().clone();
+    if let Some(ref hk) = hotkey {
+        if hk.len() > 64 {
+            return Err("Hotkey string is too long".to_string());
+        }
+        if *hk == main_shortcut {
+            return Err("Cannot use the main recording shortcut as a profile hotkey".to_string());
+        }
+        // Guard: reject duplicate hotkeys across profiles
+        let existing = state.profile_hotkeys.lock().unwrap().clone();
+        for (id, existing_hk) in &existing {
+            if id != &profile_id && existing_hk == hk {
+                return Err("That hotkey is already used by another profile".to_string());
+            }
+        }
+        // Register new hotkey
+        register_hotkey(&app, state.inner().clone(), hk)?;
+    }
+    // Unregister old hotkey for this profile if any
+    let old = state.profile_hotkeys.lock().unwrap().get(&profile_id).cloned();
+    if let Some(old_hk) = old {
+        let _ = unregister_hotkey(&app, state.inner().clone(), &old_hk);
+    }
+    {
+        let mut hotkeys = state.profile_hotkeys.lock().unwrap();
+        match hotkey {
+            Some(hk) => {
+                hotkeys.insert(profile_id, hk);
+            }
+            None => {
+                hotkeys.remove(&profile_id);
+            }
+        }
+    }
+    save_app_settings(&app, state.inner().clone())
+}
+
 // ─── Tauri Commands ───────────────────────────────────────────────────────────
 // These are callable from the React frontend via invoke().
 
@@ -2231,6 +2416,13 @@ pub fn run() {
             open_empty_state,
             get_autostart_enabled,
             set_autostart_enabled,
+            get_profiles,
+            get_ai_settings,
+            set_ai_backend,
+            set_ai_api_key,
+            set_ai_model,
+            set_ai_ollama_url,
+            set_profile_hotkey,
         ])
         .setup(move |app| {
             // Hide from macOS Dock — we're a menu bar app
