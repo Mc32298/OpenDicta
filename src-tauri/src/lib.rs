@@ -306,25 +306,56 @@ async fn set_ai_backend(
     state: tauri::State<'_, SharedState>,
     backend: String,
 ) -> Result<(), String> {
-    const VALID: &[&str] = &["openai", "anthropic", "ollama"];
+    const VALID: &[&str] = &["openai", "anthropic", "gemini", "ollama"];
     if !VALID.contains(&backend.as_str()) {
         return Err(format!("Unknown AI backend: {}", backend));
     }
+    // Bridge to the typed ai_provider field used by the execution engine.
+    let provider = match backend.as_str() {
+        "openai" => Some("openai".to_string()),
+        "gemini" => Some("gemini".to_string()),
+        _ => None,
+    };
     *state.ai_backend.lock().unwrap() = backend;
+    *state.ai_provider.lock().unwrap() = provider;
     save_app_settings(&app, state.inner().clone())
 }
 
 #[tauri::command]
-async fn set_ai_api_key(key: String) -> Result<(), String> {
+async fn set_ai_api_key(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    key: String,
+) -> Result<(), String> {
     let entry = keyring::Entry::new("voicenote", "ai_api_key").map_err(|e| e.to_string())?;
     if key.is_empty() {
-        entry.delete_credential().or_else(|e| match e {
-            keyring::Error::NoEntry => Ok(()),
-            other => Err(other.to_string()),
-        })
+        let _ = entry.delete_credential();
     } else {
-        entry.set_password(&key).map_err(|e| e.to_string())
+        entry.set_password(&key).map_err(|e| e.to_string())?;
     }
+    // Also store in the provider-specific keyring so the typed execution engine finds it.
+    let backend = state.ai_backend.lock().unwrap().clone();
+    let (provider_entry, state_slot) = match backend.as_str() {
+        "openai" => (Some(openai_keyring_entry()), Some("openai")),
+        "gemini" => (Some(gemini_keyring_entry()), Some("gemini")),
+        _ => (None, None),
+    };
+    if let Some(pe) = provider_entry {
+        if key.is_empty() {
+            let _ = pe.delete_credential();
+        } else {
+            pe.set_password(&key).map_err(|e| e.to_string())?;
+        }
+    }
+    if let Some(slot) = state_slot {
+        let val = if key.is_empty() { None } else { Some(key) };
+        match slot {
+            "openai" => *state.openai_api_key.lock().unwrap() = val,
+            "gemini" => *state.gemini_api_key.lock().unwrap() = val,
+            _ => {}
+        }
+    }
+    save_app_settings(&app, state.inner().clone())
 }
 
 #[tauri::command]
@@ -679,132 +710,6 @@ async fn get_hf_token(state: tauri::State<'_, SharedState>) -> Result<Option<Str
     Ok(state.hf_token.lock().unwrap().as_ref().map(|t| mask_token(t)))
 }
 
-#[derive(Clone, serde::Serialize)]
-struct AiSettingsPayload {
-    preset: String,
-    provider: Option<String>,
-    model: Option<String>,
-    target_language: Option<String>,
-    openai_key: Option<String>,
-    gemini_key: Option<String>,
-}
-
-#[tauri::command]
-async fn get_ai_settings(state: tauri::State<'_, SharedState>) -> Result<AiSettingsPayload, String> {
-    Ok(AiSettingsPayload {
-        preset: state.ai_preset.lock().unwrap().clone(),
-        provider: state.ai_provider.lock().unwrap().clone(),
-        model: state.ai_model.lock().unwrap().clone(),
-        target_language: state.ai_target_language.lock().unwrap().clone(),
-        openai_key: state
-            .openai_api_key
-            .lock()
-            .unwrap()
-            .as_deref()
-            .map(mask_token),
-        gemini_key: state
-            .gemini_api_key
-            .lock()
-            .unwrap()
-            .as_deref()
-            .map(mask_token),
-    })
-}
-
-#[tauri::command]
-async fn set_ai_preset(
-    app: AppHandle,
-    state: tauri::State<'_, SharedState>,
-    preset: String,
-) -> Result<(), String> {
-    let preset = preset.trim().to_lowercase();
-    AiPreset::from_settings_value(&preset)
-        .ok_or_else(|| "Unsupported AI preset".to_string())?;
-    *state.ai_preset.lock().unwrap() = preset;
-    save_app_settings(&app, state.inner().clone())
-}
-
-#[tauri::command]
-async fn set_ai_provider(
-    app: AppHandle,
-    state: tauri::State<'_, SharedState>,
-    provider: Option<String>,
-) -> Result<(), String> {
-    let provider = provider
-        .map(|value| value.trim().to_lowercase())
-        .filter(|value| !value.is_empty());
-    if let Some(ref value) = provider {
-        AiProvider::from_settings_value(value)
-            .ok_or_else(|| "Unsupported AI provider".to_string())?;
-    }
-    let next_model = provider.as_deref().and_then(AiProvider::from_settings_value).map(|provider| {
-        let current = state.ai_model.lock().unwrap().clone();
-        current
-            .and_then(|value| AiModel::from_settings_value(&value))
-            .filter(|model| model.provider() == provider)
-            .unwrap_or_else(|| AiModel::default_for_provider(provider))
-            .as_settings_value()
-            .to_string()
-    });
-    *state.ai_provider.lock().unwrap() = provider;
-    *state.ai_model.lock().unwrap() = next_model;
-    save_app_settings(&app, state.inner().clone())
-}
-
-#[tauri::command]
-async fn set_ai_model(
-    app: AppHandle,
-    state: tauri::State<'_, SharedState>,
-    model: String,
-) -> Result<(), String> {
-    let model = model.trim().to_lowercase();
-    let model = AiModel::from_settings_value(&model)
-        .ok_or_else(|| "Unsupported AI model".to_string())?;
-    *state.ai_provider.lock().unwrap() = Some(model.provider().as_settings_value().to_string());
-    *state.ai_model.lock().unwrap() = Some(model.as_settings_value().to_string());
-    save_app_settings(&app, state.inner().clone())
-}
-
-#[tauri::command]
-async fn set_ai_target_language(
-    app: AppHandle,
-    state: tauri::State<'_, SharedState>,
-    language: Option<String>,
-) -> Result<(), String> {
-    let language = language
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    *state.ai_target_language.lock().unwrap() = language;
-    save_app_settings(&app, state.inner().clone())
-}
-
-#[tauri::command]
-async fn set_openai_api_key(
-    app: AppHandle,
-    state: tauri::State<'_, SharedState>,
-    token: Option<String>,
-) -> Result<(), String> {
-    let token = token
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    save_ai_secret(&app, "openai_api_key", openai_keyring_entry(), token.as_deref())?;
-    *state.openai_api_key.lock().unwrap() = token;
-    Ok(())
-}
-
-#[tauri::command]
-async fn set_gemini_api_key(
-    app: AppHandle,
-    state: tauri::State<'_, SharedState>,
-    token: Option<String>,
-) -> Result<(), String> {
-    let token = token
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    save_ai_secret(&app, "gemini_api_key", gemini_keyring_entry(), token.as_deref())?;
-    *state.gemini_api_key.lock().unwrap() = token;
-    Ok(())
-}
 
 #[tauri::command]
 async fn set_hf_token(
@@ -2692,6 +2597,28 @@ async fn apply_ai_with_prompt(
                 .map(|s| s.trim().to_string())
                 .ok_or_else(|| format!("Unexpected Anthropic response: {}", json))
         }
+        "gemini" => {
+            let body = serde_json::json!({
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": [{"role": "user", "parts": [{"text": transcript}]}],
+                "generationConfig": {"maxOutputTokens": 1024}
+            });
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+                model, api_key
+            );
+            let resp = client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Gemini request failed: {}", e))?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            json["candidates"][0]["content"]["parts"][0]["text"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .ok_or_else(|| format!("Unexpected Gemini response: {}", json))
+        }
         "ollama" => {
             let body = serde_json::json!({
                 "model": model,
@@ -3007,12 +2934,7 @@ pub fn run() {
             get_provider_runtime_status,
             set_onnx_provider,
             get_ai_settings,
-            set_ai_preset,
-            set_ai_provider,
             set_ai_model,
-            set_ai_target_language,
-            set_openai_api_key,
-            set_gemini_api_key,
             get_hf_token,
             set_hf_token,
             get_voicebar_visible,
