@@ -2,16 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type {
-  AiPreset,
-  AiProvider,
-  AiModel,
-  AiSettingsPayload,
-  HealthStatus,
-  Page,
-  ProviderRuntimeStatus,
-  ShortcutStatus,
-} from "./settingsTypes";
+import type { AiDefaultMode, AiSettings, HealthStatus, Page, ProfileInfo, ProviderRuntimeStatus, ShortcutStatus } from "./settingsTypes";
 import { Button, SettingsRow, SettingsSection, StatusBadge, ToggleSwitch } from "../ui/controls";
 import { ToastProvider, useToast } from "../ui/toast";
 import { ActivityIcon, BoxIcon, GearIcon, InfoIcon, KeyboardIcon, MicIcon, PaletteIcon } from "../ui/icons";
@@ -28,6 +19,7 @@ const PAGE_ALIASES: Record<string, Page> = {
   models: "model",
   ai: "ai",
   appearance: "appearance",
+  ai: "ai",
   diagnostics: "diagnostics",
   about: "about",
 };
@@ -88,30 +80,14 @@ export default function Settings() {
         <Sidebar active={page} onSelect={setPage} />
         <main className="wv-main">
           <ToastProvider>
-            <section className="wv-page" data-active={page === "general" ? "1" : "0"} style={{ display: page === "general" ? "" : "none" }}>
-              <GeneralTab />
-            </section>
-            <section className="wv-page" data-active={page === "shortcut" ? "1" : "0"} style={{ display: page === "shortcut" ? "" : "none" }}>
-              <ShortcutTab />
-            </section>
-            <section className="wv-page" data-active={page === "microphone" ? "1" : "0"} style={{ display: page === "microphone" ? "" : "none" }}>
-              <MicrophoneTab accent={accent} onAccentChange={setAccent} />
-            </section>
-            <section className="wv-page" data-active={page === "model" ? "1" : "0"} style={{ display: page === "model" ? "" : "none" }}>
-              <ModelTab />
-            </section>
-            <section className="wv-page" data-active={page === "ai" ? "1" : "0"} style={{ display: page === "ai" ? "" : "none" }}>
-              <AiTab />
-            </section>
-            <section className="wv-page" data-active={page === "appearance" ? "1" : "0"} style={{ display: page === "appearance" ? "" : "none" }}>
-              <AppearanceTab accent={accent} onAccentChange={setAccent} />
-            </section>
-            <section className="wv-page" data-active={page === "diagnostics" ? "1" : "0"} style={{ display: page === "diagnostics" ? "" : "none" }}>
-              <DiagnosticsTab />
-            </section>
-            <section className="wv-page" data-active={page === "about" ? "1" : "0"} style={{ display: page === "about" ? "" : "none" }}>
-              <AboutTab onNavigate={setPage} />
-            </section>
+            <div style={{ display: page === "general" ? "" : "none" }}><GeneralTab /></div>
+            <div style={{ display: page === "shortcut" ? "" : "none" }}><ShortcutTab /></div>
+            <div style={{ display: page === "microphone" ? "" : "none" }}><MicrophoneTab accent={accent} onAccentChange={setAccent} /></div>
+            <div style={{ display: page === "model" ? "" : "none" }}><ModelTab /></div>
+            <div style={{ display: page === "appearance" ? "" : "none" }}><AppearanceTab accent={accent} onAccentChange={setAccent} /></div>
+            <div style={{ display: page === "ai" ? "" : "none" }}><AiTab /></div>
+            <div style={{ display: page === "diagnostics" ? "" : "none" }}><DiagnosticsTab /></div>
+            <div style={{ display: page === "about" ? "" : "none" }}><AboutTab onNavigate={setPage} /></div>
           </ToastProvider>
         </main>
       </div>
@@ -178,6 +154,7 @@ function Sidebar({ active, onSelect }: { active: Page; onSelect: (page: Page) =>
     { id: "model", label: "Model", icon: <BoxIcon /> },
     { id: "ai", label: "AI", icon: <ActivityIcon /> },
     { id: "appearance", label: "Appearance", icon: <PaletteIcon /> },
+    { id: "ai", label: "AI ✦", icon: <span style={{ fontSize: "13px" }}>✦</span> },
     { id: "diagnostics", label: "Diagnostics", icon: <ActivityIcon /> },
     { id: "about", label: "About", icon: <InfoIcon /> },
   ];
@@ -563,6 +540,14 @@ function MicrophoneTab({ accent, onAccentChange }: { accent: string; onAccentCha
   const [testBusy, setTestBusy] = useState(false);
   const colorDebounceRef = useRef<number | null>(null);
   const { showErr, showOk } = useToast();
+
+  useEffect(() => {
+    return () => {
+      if (colorDebounceRef.current !== null) {
+        window.clearTimeout(colorDebounceRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     void invoke<{ selected_device?: string; devices: string[] }>("get_audio_input_info")
@@ -1145,6 +1130,301 @@ function AboutTab({ onNavigate }: { onNavigate: (page: Page) => void }) {
         <SettingsRow label="Diagnostics" hint="View worker and model health checks." last>
           <Button onClick={() => onNavigate("diagnostics")}>Open Diagnostics</Button>
         </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
+
+const AI_MODES: Array<{ value: AiDefaultMode; label: string; hint: string }> = [
+  { value: "raw",           label: "Raw",             hint: "Paste transcript as-is" },
+  { value: "clean",         label: "Clean",           hint: "Fix grammar & punctuation" },
+  { value: "translate",     label: "Translate",       hint: "Translate to English" },
+  { value: "clean_translate", label: "Clean + Translate", hint: "Fix grammar, then translate" },
+];
+
+function AiTab() {
+  const [settings, setSettings] = useState<AiSettings | null>(null);
+  const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  // capturingFor holds the profile_id that is waiting for a hotkey press
+  const [capturingFor, setCapturingFor] = useState<string | null>(null);
+  const { showErr, showOk, showInfo } = useToast();
+
+  const load = async () => {
+    const [s, p] = await Promise.all([
+      invoke<AiSettings>("get_ai_settings"),
+      invoke<ProfileInfo[]>("get_profiles"),
+    ]);
+    setSettings(s);
+    setProfiles(p);
+  };
+
+  useEffect(() => {
+    void load().catch((e) => showErr(`Could not load AI settings: ${String(e)}`));
+  }, []);
+
+  // Hotkey capture listener — mirrors ShortcutTab's captureMode pattern
+  useEffect(() => {
+    if (!capturingFor) return;
+    let fired = false;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (fired) return;
+      fired = true;
+      e.preventDefault();
+      const normalized = normalizeShortcutFromEvent(e);
+      if (!normalized) {
+        showErr("Could not capture this shortcut. Try a different key combination.");
+        setCapturingFor(null);
+        return;
+      }
+      const profileId = capturingFor;
+      setCapturingFor(null);
+      showInfo(`Captured: ${normalized}. Saving…`);
+      void (async () => {
+        setBusy(true);
+        try {
+          await invoke("set_profile_hotkey", { profileId, hotkey: normalized });
+          setProfiles((ps) =>
+            ps.map((p) => (p.id === profileId ? { ...p, hotkey: normalized } : p))
+          );
+          showOk(`Hotkey ${normalized} assigned.`);
+        } catch (ex) {
+          showErr(String(ex));
+        } finally {
+          setBusy(false);
+        }
+      })();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [capturingFor]);
+
+  const saveDefaultMode = async (mode: AiDefaultMode) => {
+    setBusy(true);
+    try {
+      await invoke("set_ai_default_mode", { mode });
+      setSettings((s) => (s ? { ...s, default_mode: mode } : s));
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveBackend = async (backend: AiSettings["backend"]) => {
+    setBusy(true);
+    try {
+      await invoke("set_ai_backend", { backend });
+      setSettings((s) => (s ? { ...s, backend } : s));
+      showOk("Backend updated.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveApiKey = async () => {
+    if (!apiKeyInput) return;
+    setBusy(true);
+    try {
+      await invoke("set_ai_api_key", { key: apiKeyInput });
+      setApiKeyInput("");
+      setSettings((s) => (s ? { ...s, api_key_masked: "••••••••••••••••" } : s));
+      showOk("API key saved.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveModel = async (model: string) => {
+    if (!model.trim()) return;
+    setBusy(true);
+    try {
+      await invoke("set_ai_model", { model: model.trim() });
+      setSettings((s) => (s ? { ...s, model: model.trim() } : s));
+      showOk("Model updated.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveOllamaUrl = async (url: string) => {
+    if (!url.trim()) return;
+    setBusy(true);
+    try {
+      await invoke("set_ai_ollama_url", { url: url.trim() });
+      setSettings((s) => (s ? { ...s, ollama_url: url.trim() } : s));
+      showOk("Ollama URL saved.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearHotkey = async (profileId: string) => {
+    setBusy(true);
+    try {
+      await invoke("set_profile_hotkey", { profileId, hotkey: null });
+      setProfiles((ps) => ps.map((p) => (p.id === profileId ? { ...p, hotkey: null } : p)));
+      showOk("Hotkey cleared.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!settings) {
+    return (
+      <div className="wv-pane">
+        <PaneHeader title="AI" subtitle="Post-processing profiles." />
+        <div className="wv-note" style={{ padding: "16px" }}>Loading…</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="AI ✦" subtitle="Reshape transcripts automatically after every recording." />
+
+      <SettingsSection title="Default processing">
+        <SettingsRow label="Output mode" hint="Applied to every recording. Profile hotkeys override this." last>
+          <div className="wv-seg">
+            {AI_MODES.map((m) => (
+              <button
+                key={m.value}
+                type="button"
+                className="wv-seg-btn"
+                data-active={settings.default_mode === m.value ? "1" : "0"}
+                disabled={busy}
+                title={m.hint}
+                onClick={() => void saveDefaultMode(m.value)}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title="AI Backend">
+        <SettingsRow label="Provider">
+          <select
+            className="wv-select"
+            value={settings.backend}
+            disabled={busy}
+            onChange={(e) => void saveBackend(e.target.value as AiSettings["backend"])}
+          >
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="ollama">Local (Ollama)</option>
+          </select>
+        </SettingsRow>
+
+        {settings.backend !== "ollama" && (
+          <>
+            <SettingsRow label="API Key" hint="Stored securely in the OS keyring — never written to disk.">
+              <input
+                className="wv-input"
+                type="password"
+                placeholder={settings.api_key_masked || "sk-…"}
+                value={apiKeyInput}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                disabled={busy}
+                style={{ width: "160px" }}
+              />
+              <Button onClick={() => void saveApiKey()} disabled={busy || !apiKeyInput}>
+                Save
+              </Button>
+            </SettingsRow>
+            <SettingsRow label="Model" hint='e.g. "gpt-4o-mini" or "claude-3-haiku-20240307"' last>
+              <input
+                className="wv-input"
+                type="text"
+                defaultValue={settings.model}
+                disabled={busy}
+                onBlur={(e) => void saveModel(e.target.value)}
+                style={{ width: "200px" }}
+              />
+            </SettingsRow>
+          </>
+        )}
+
+        {settings.backend === "ollama" && (
+          <>
+            <SettingsRow label="Ollama URL">
+              <input
+                className="wv-input"
+                type="text"
+                defaultValue={settings.ollama_url}
+                disabled={busy}
+                onBlur={(e) => void saveOllamaUrl(e.target.value)}
+                style={{ width: "200px" }}
+              />
+            </SettingsRow>
+            <SettingsRow label="Model" hint='e.g. "llama3"' last>
+              <input
+                className="wv-input"
+                type="text"
+                defaultValue={settings.model}
+                disabled={busy}
+                onBlur={(e) => void saveModel(e.target.value)}
+                style={{ width: "200px" }}
+              />
+            </SettingsRow>
+          </>
+        )}
+      </SettingsSection>
+
+      <SettingsSection title="Profiles — assign a hotkey to activate during recording">
+        {profiles.map((profile, idx) => (
+          <SettingsRow
+            key={profile.id}
+            label={profile.name}
+            last={idx === profiles.length - 1}
+          >
+            {capturingFor === profile.id ? (
+              <div className="wv-capture-indicator">
+                <span className="wv-capture-ring" />
+                Press any key…
+              </div>
+            ) : profile.hotkey ? (
+              <div className="wv-inline">
+                <span className="wv-kbd">{profile.hotkey}</span>
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => void clearHotkey(profile.id)}
+                >
+                  Clear
+                </Button>
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                disabled={busy || capturingFor !== null}
+                onClick={() => setCapturingFor(profile.id)}
+              >
+                + Assign hotkey
+              </Button>
+            )}
+            {capturingFor === profile.id && (
+              <Button
+                variant="ghost"
+                onClick={() => setCapturingFor(null)}
+              >
+                Cancel
+              </Button>
+            )}
+          </SettingsRow>
+        ))}
       </SettingsSection>
     </div>
   );

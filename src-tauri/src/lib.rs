@@ -114,13 +114,19 @@ struct AppState {
     /// True once onboarding has been completed by the user.
     onboarding_completed: Arc<AtomicBool>,
     completion_sound: Arc<AtomicBool>,
-    ai_preset: Arc<Mutex<String>>,
-    ai_provider: Arc<Mutex<Option<String>>>,
-    ai_model: Arc<Mutex<Option<String>>>,
-    ai_target_language: Arc<Mutex<Option<String>>>,
-    openai_api_key: Arc<Mutex<Option<String>>>,
-    gemini_api_key: Arc<Mutex<Option<String>>>,
-    http_client: reqwest::Client,
+    /// Default processing mode for every recording (unless a profile hotkey overrides).
+    /// Values: "raw" | "clean" | "translate" | "clean_translate"
+    ai_default_mode: Arc<Mutex<String>>,
+    /// AI backend: "openai" | "anthropic" | "ollama"
+    ai_backend: Arc<Mutex<String>>,
+    /// AI model name, e.g. "gpt-4o-mini"
+    ai_model: Arc<Mutex<String>>,
+    /// Ollama base URL, e.g. "http://localhost:11434"
+    ai_ollama_url: Arc<Mutex<String>>,
+    /// Map of profile_id → assigned hotkey string
+    profile_hotkeys: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    /// Profile currently being applied (set on profile hotkey press, cleared after paste)
+    active_profile: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -164,16 +170,12 @@ impl AppState {
             hf_token: Arc::new(Mutex::new(None)),
             onboarding_completed: Arc::new(AtomicBool::new(false)),
             completion_sound: Arc::new(AtomicBool::new(false)),
-            ai_preset: Arc::new(Mutex::new("raw".to_string())),
-            ai_provider: Arc::new(Mutex::new(None)),
-            ai_model: Arc::new(Mutex::new(None)),
-            ai_target_language: Arc::new(Mutex::new(None)),
-            openai_api_key: Arc::new(Mutex::new(None)),
-            gemini_api_key: Arc::new(Mutex::new(None)),
-            http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(12))
-                .build()
-                .expect("failed to build shared HTTP client"),
+            ai_default_mode: Arc::new(Mutex::new("raw".to_string())),
+            ai_backend: Arc::new(Mutex::new("openai".to_string())),
+            ai_model: Arc::new(Mutex::new("gpt-4o-mini".to_string())),
+            ai_ollama_url: Arc::new(Mutex::new("http://localhost:11434".to_string())),
+            profile_hotkeys: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            active_profile: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -194,6 +196,212 @@ fn idle_timeout_ms(profile: &str) -> u64 {
 }
 
 type SharedState = Arc<AppState>;
+
+// ─── AI Profiles ──────────────────────────────────────────────────────────────
+
+struct Profile {
+    id: &'static str,
+    name: &'static str,
+    system_prompt: &'static str,
+}
+
+const PROFILES: &[Profile] = &[
+    Profile {
+        id: "fix_grammar",
+        name: "Fix Grammar",
+        system_prompt: "Fix grammar and punctuation. Preserve meaning and tone. Return only the corrected text, no explanation.",
+    },
+    Profile {
+        id: "bullet_points",
+        name: "Bullet Points",
+        system_prompt: "Convert to a concise bulleted list. Return only the list, no preamble.",
+    },
+    Profile {
+        id: "email_draft",
+        name: "Email Draft",
+        system_prompt: "Format as a professional email with an appropriate greeting and closing. Return only the email.",
+    },
+    Profile {
+        id: "make_formal",
+        name: "Make Formal",
+        system_prompt: "Rewrite in formal, professional language. Return only the rewritten text.",
+    },
+    Profile {
+        id: "summarize",
+        name: "Summarize",
+        system_prompt: "Summarize in 1-2 sentences. Return only the summary.",
+    },
+];
+
+#[derive(serde::Serialize)]
+struct ProfileInfo {
+    id: String,
+    name: String,
+    hotkey: Option<String>,
+}
+
+#[tauri::command]
+async fn get_profiles(state: tauri::State<'_, SharedState>) -> Result<Vec<ProfileInfo>, String> {
+    let hotkeys = state.profile_hotkeys.lock().unwrap().clone();
+    Ok(PROFILES
+        .iter()
+        .map(|p| ProfileInfo {
+            id: p.id.to_string(),
+            name: p.name.to_string(),
+            hotkey: hotkeys.get(p.id).cloned(),
+        })
+        .collect())
+}
+
+// ─── AI Settings Commands ─────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct AiSettingsInfo {
+    default_mode: String,
+    backend: String,
+    model: String,
+    api_key_masked: String,
+    ollama_url: String,
+    profile_hotkeys: std::collections::HashMap<String, String>,
+}
+
+#[tauri::command]
+async fn get_ai_settings(state: tauri::State<'_, SharedState>) -> Result<AiSettingsInfo, String> {
+    let raw_key = keyring::Entry::new("voicenote", "ai_api_key")
+        .ok()
+        .and_then(|e| e.get_password().ok())
+        .unwrap_or_default();
+    Ok(AiSettingsInfo {
+        default_mode: state.ai_default_mode.lock().unwrap().clone(),
+        backend: state.ai_backend.lock().unwrap().clone(),
+        model: state.ai_model.lock().unwrap().clone(),
+        api_key_masked: mask_token(&raw_key),
+        ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
+        profile_hotkeys: state.profile_hotkeys.lock().unwrap().clone(),
+    })
+}
+
+#[tauri::command]
+async fn get_ai_default_mode(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    Ok(state.ai_default_mode.lock().unwrap().clone())
+}
+
+#[tauri::command]
+async fn set_ai_default_mode(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    mode: String,
+) -> Result<(), String> {
+    const VALID: &[&str] = &["raw", "clean", "translate", "clean_translate"];
+    if !VALID.contains(&mode.as_str()) {
+        return Err(format!("Unknown mode: {}", mode));
+    }
+    *state.ai_default_mode.lock().unwrap() = mode;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_ai_backend(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    backend: String,
+) -> Result<(), String> {
+    const VALID: &[&str] = &["openai", "anthropic", "ollama"];
+    if !VALID.contains(&backend.as_str()) {
+        return Err(format!("Unknown AI backend: {}", backend));
+    }
+    *state.ai_backend.lock().unwrap() = backend;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_ai_api_key(key: String) -> Result<(), String> {
+    let entry = keyring::Entry::new("voicenote", "ai_api_key").map_err(|e| e.to_string())?;
+    if key.is_empty() {
+        entry.delete_credential().or_else(|e| match e {
+            keyring::Error::NoEntry => Ok(()),
+            other => Err(other.to_string()),
+        })
+    } else {
+        entry.set_password(&key).map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+async fn set_ai_model(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    model: String,
+) -> Result<(), String> {
+    let model = model.trim().to_string();
+    if model.is_empty() || model.len() > 64 {
+        return Err("Invalid model name".to_string());
+    }
+    *state.ai_model.lock().unwrap() = model;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_ai_ollama_url(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    url: String,
+) -> Result<(), String> {
+    let url = url.trim().to_string();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("URL must start with http:// or https://".to_string());
+    }
+    *state.ai_ollama_url.lock().unwrap() = url;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
+async fn set_profile_hotkey(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    profile_id: String,
+    hotkey: Option<String>,
+) -> Result<(), String> {
+    // Validate profile_id against hardcoded list
+    if !PROFILES.iter().any(|p| p.id == profile_id) {
+        return Err(format!("Unknown profile: {}", profile_id));
+    }
+    let main_shortcut = state.shortcut.lock().unwrap().clone();
+    if let Some(ref hk) = hotkey {
+        if hk.len() > 64 {
+            return Err("Hotkey string is too long".to_string());
+        }
+        if *hk == main_shortcut {
+            return Err("Cannot use the main recording shortcut as a profile hotkey".to_string());
+        }
+        // Guard: reject duplicate hotkeys across profiles
+        let existing = state.profile_hotkeys.lock().unwrap().clone();
+        for (id, existing_hk) in &existing {
+            if id != &profile_id && existing_hk == hk {
+                return Err("That hotkey is already used by another profile".to_string());
+            }
+        }
+        // Register new hotkey
+        register_hotkey(&app, state.inner().clone(), hk)?;
+    }
+    // Unregister old hotkey for this profile if any
+    let old = state.profile_hotkeys.lock().unwrap().get(&profile_id).cloned();
+    if let Some(old_hk) = old {
+        let _ = unregister_hotkey(&app, state.inner().clone(), &old_hk);
+    }
+    {
+        let mut hotkeys = state.profile_hotkeys.lock().unwrap();
+        match hotkey {
+            Some(hk) => {
+                hotkeys.insert(profile_id, hk);
+            }
+            None => {
+                hotkeys.remove(&profile_id);
+            }
+        }
+    }
+    save_app_settings(&app, state.inner().clone())
+}
 
 // ─── Tauri Commands ───────────────────────────────────────────────────────────
 // These are callable from the React frontend via invoke().
@@ -216,6 +424,10 @@ async fn cancel_recording(
     // Give the cpal callback one tick to finish its current batch before we clear
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     state.audio_buffer.lock().unwrap().clear();
+    // Clear any pending AI profile so the cancelled recording doesn't bleed into
+    // the next one
+    *state.active_profile.lock().unwrap() = None;
+    let _ = app.emit("active-profile-changed", serde_json::Value::Null);
     hide_voicebar(&app);
     Ok(())
 }
@@ -317,14 +529,16 @@ struct AppSettings {
     onboarding_completed: bool,
     #[serde(default)]
     completion_sound: bool,
-    #[serde(default = "default_ai_preset")]
-    ai_preset: String,
+    #[serde(default = "default_ai_default_mode")]
+    ai_default_mode: String,
+    #[serde(default = "default_ai_backend")]
+    ai_backend: String,
+    #[serde(default = "default_ai_model")]
+    ai_model: String,
+    #[serde(default = "default_ai_ollama_url")]
+    ai_ollama_url: String,
     #[serde(default)]
-    ai_provider: Option<String>,
-    #[serde(default)]
-    ai_model: Option<String>,
-    #[serde(default)]
-    ai_target_language: Option<String>,
+    profile_hotkeys: std::collections::HashMap<String, String>,
 }
 
 fn default_waveform_color() -> String {
@@ -347,8 +561,20 @@ fn default_onnx_provider() -> String {
     "cpu".to_string()
 }
 
-fn default_ai_preset() -> String {
+fn default_ai_default_mode() -> String {
     "raw".to_string()
+}
+
+fn default_ai_backend() -> String {
+    "openai".to_string()
+}
+
+fn default_ai_model() -> String {
+    "gpt-4o-mini".to_string()
+}
+
+fn default_ai_ollama_url() -> String {
+    "http://localhost:11434".to_string()
 }
 
 #[tauri::command]
@@ -925,6 +1151,9 @@ async fn set_shortcut(
     if shortcut.is_empty() {
         return Err("Shortcut cannot be empty".to_string());
     }
+    if shortcut.len() > 64 {
+        return Err("Shortcut string is too long".to_string());
+    }
 
     let old = state.shortcut.lock().unwrap().clone();
     unregister_hotkey(&app, state.inner().clone(), old.as_str())?;
@@ -1208,10 +1437,11 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         hf_token: None,
         onboarding_completed: state.onboarding_completed.load(Ordering::SeqCst),
         completion_sound: state.completion_sound.load(Ordering::SeqCst),
-        ai_preset: state.ai_preset.lock().unwrap().clone(),
-        ai_provider: state.ai_provider.lock().unwrap().clone(),
+        ai_default_mode: state.ai_default_mode.lock().unwrap().clone(),
+        ai_backend: state.ai_backend.lock().unwrap().clone(),
         ai_model: state.ai_model.lock().unwrap().clone(),
-        ai_target_language: state.ai_target_language.lock().unwrap().clone(),
+        ai_ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
+        profile_hotkeys: state.profile_hotkeys.lock().unwrap().clone(),
     };
     let payload = serde_json::to_string(&settings)
         .map_err(|e| format!("Failed to serialize app settings: {}", e))?;
@@ -1262,6 +1492,11 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
         .onboarding_completed
         .store(settings.onboarding_completed, Ordering::SeqCst);
     state.completion_sound.store(settings.completion_sound, Ordering::SeqCst);
+    *state.ai_default_mode.lock().unwrap() = settings.ai_default_mode;
+    *state.ai_backend.lock().unwrap() = settings.ai_backend;
+    *state.ai_model.lock().unwrap() = settings.ai_model;
+    *state.ai_ollama_url.lock().unwrap() = settings.ai_ollama_url;
+    *state.profile_hotkeys.lock().unwrap() = settings.profile_hotkeys;
     {
         let provider = state.onnx_provider.lock().unwrap().clone();
         let mut rt = state.provider_runtime.lock().unwrap();
@@ -1490,12 +1725,10 @@ fn save_hf_token_secret(token: Option<&str>) -> Result<(), String> {
 }
 
 fn mask_token(token: &str) -> String {
-    let chars: Vec<char> = token.chars().collect();
-    if chars.len() <= 8 {
-        return "********".to_string();
+    if token.is_empty() {
+        return String::new();
     }
-    let suffix: String = chars[chars.len() - 4..].iter().collect();
-    format!("********{}", suffix)
+    "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string()
 }
 
 async fn compute_sha256_hex(path: &Path) -> Result<String, String> {
@@ -1533,6 +1766,8 @@ fn show_voicebar(app: &AppHandle) {
         // with the Tauri backend. The CSS rule :root[data-vb="1"] overrides the
         // pill-shell--hidden class, so no event round-trip is needed for the
         // first-press case.
+        // SAFETY: eval() string is hardcoded; no user input is interpolated here.
+        // Do not extend this pattern with dynamic values — use win.emit() instead.
         let _ = win.eval("document.documentElement.setAttribute('data-vb','1');");
         let _ = win.emit("voicebar-show", ());
     }
@@ -1543,6 +1778,7 @@ fn hide_voicebar(app: &AppHandle) {
         if let Some(state) = app.try_state::<SharedState>() {
             state.voicebar_visible.store(false, Ordering::SeqCst);
         }
+        // SAFETY: eval() string is hardcoded; no user input is interpolated here.
         let _ = win.eval("document.documentElement.removeAttribute('data-vb');");
         let _ = win.emit("voicebar-hide", ());
     }
@@ -1625,12 +1861,27 @@ fn open_empty_state_page(app: &AppHandle, tab: Option<&str>) {
 
 #[tauri::command]
 async fn open_settings_page_command(app: AppHandle, page: Option<String>) -> Result<(), String> {
+    const VALID_PAGES: &[&str] = &[
+        "general", "shortcuts", "microphone", "model",
+        "appearance", "diagnostics", "about",
+    ];
+    if let Some(ref p) = page {
+        if !VALID_PAGES.contains(&p.as_str()) {
+            return Err(format!("Unknown settings page: {}", p));
+        }
+    }
     open_settings_page(&app, page.as_deref());
     Ok(())
 }
 
 #[tauri::command]
 async fn open_empty_state(app: AppHandle, tab: Option<String>) -> Result<(), String> {
+    const VALID_TABS: &[&str] = &["history", "models", "prompts"];
+    if let Some(ref t) = tab {
+        if !VALID_TABS.contains(&t.as_str()) {
+            return Err(format!("Unknown empty-state tab: {}", t));
+        }
+    }
     open_empty_state_page(&app, tab.as_deref());
     Ok(())
 }
@@ -2211,18 +2462,73 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     if transcript.is_empty() {
                         continue;
                     }
+                    #[cfg(debug_assertions)]
                     println!("Transcript: {}", transcript);
 
-                    let transcript_for_transform = transcript.clone();
-                    let transcript_for_ui = transcript.clone();
-                    let transcript_fallback = transcript.clone();
-                    let app_for_transform = app_stdout.clone();
-                    let state_for_transform = state_for_stdout.clone();
+                    // Check if an AI profile should be applied (take() clears it atomically)
+                    let active_profile = state_for_stdout.active_profile.lock().unwrap().take();
+                    let default_mode = state_for_stdout.ai_default_mode.lock().unwrap().clone();
 
-                    tauri::async_runtime::spawn(async move {
-                        match transform_transcript_if_enabled(
-                            state_for_transform.clone(),
-                            transcript_for_transform,
+                    // Resolve the effective system prompt:
+                    // 1. Profile hotkey takes priority.
+                    // 2. Otherwise, fall back to the configured default mode.
+                    let effective_prompt: Option<&'static str> = if let Some(ref pid) = active_profile {
+                        PROFILES.iter().find(|p| p.id == pid).map(|p| p.system_prompt)
+                    } else {
+                        match default_mode.as_str() {
+                            "clean" => Some("Fix grammar and punctuation. Preserve meaning and tone. Return only the corrected text, no explanation."),
+                            "translate" => Some("Translate to English. Return only the translation, no explanation or preamble."),
+                            "clean_translate" => Some("Fix grammar and punctuation, then translate to English. Return only the final corrected and translated text."),
+                            _ => None, // "raw" — no AI processing
+                        }
+                    };
+
+                    let final_text = if let Some(prompt) = effective_prompt {
+                        // Notify the UI that we are applying AI
+                        let _ = app_stdout.emit(
+                            "sidecar-status",
+                            serde_json::json!({ "message": "Applying AI\u{2026}" }),
+                        );
+
+                        let backend = state_for_stdout.ai_backend.lock().unwrap().clone();
+                        let model = state_for_stdout.ai_model.lock().unwrap().clone();
+                        let ollama_url = state_for_stdout.ai_ollama_url.lock().unwrap().clone();
+                        let api_key = keyring::Entry::new("voicenote", "ai_api_key")
+                            .ok()
+                            .and_then(|e| e.get_password().ok())
+                            .unwrap_or_default();
+
+                        match tauri::async_runtime::block_on(apply_ai_with_prompt(
+                            &transcript,
+                            prompt,
+                            &backend,
+                            &model,
+                            &api_key,
+                            &ollama_url,
+                        )) {
+                            Ok(processed) => processed,
+                            Err(e) => {
+                                eprintln!("AI post-processing failed: {}", e);
+                                let _ = app_stdout.emit(
+                                    "ai-processing-error",
+                                    serde_json::json!({ "message": e }),
+                                );
+                                // Fall back to raw transcript
+                                transcript.clone()
+                            }
+                        }
+                    } else {
+                        transcript.clone()
+                    };
+
+                    // Auto-paste the result into the previously active app
+                    paste_text(&final_text);
+
+                    // Notify the Voice Bar UI
+                    app_stdout
+                        .emit(
+                            "transcript-ready",
+                            serde_json::json!({ "text": final_text }),
                         )
                         .await
                         {
@@ -2324,6 +2630,92 @@ fn kill_sidecar(state: &SharedState) {
     state.sidecar_standby.store(false, Ordering::SeqCst);
     state.sidecar_busy.store(false, Ordering::SeqCst);
     println!("STT worker stopped — RAM freed");
+}
+
+// ─── AI Post-Processing ───────────────────────────────────────────────────────
+//
+// Sends the raw transcript to the configured AI backend and returns the
+// processed text.  Supports OpenAI, Anthropic, and Ollama.
+
+/// Core AI call — sends `transcript` to the backend with the given `system_prompt`.
+async fn apply_ai_with_prompt(
+    transcript: &str,
+    system_prompt: &str,
+    backend: &str,
+    model: &str,
+    api_key: &str,
+    ollama_url: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    match backend {
+        "openai" => {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": transcript}
+                ],
+                "max_tokens": 1024
+            });
+            let resp = client
+                .post("https://api.openai.com/v1/chat/completions")
+                .bearer_auth(api_key)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("OpenAI request failed: {}", e))?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            json["choices"][0]["message"]["content"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .ok_or_else(|| format!("Unexpected OpenAI response: {}", json))
+        }
+        "anthropic" => {
+            let body = serde_json::json!({
+                "model": model,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": transcript}],
+                "max_tokens": 1024
+            });
+            let resp = client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Anthropic request failed: {}", e))?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            json["content"][0]["text"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .ok_or_else(|| format!("Unexpected Anthropic response: {}", json))
+        }
+        "ollama" => {
+            let body = serde_json::json!({
+                "model": model,
+                "stream": false,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": transcript}
+                ]
+            });
+            let url = format!("{}/api/chat", ollama_url.trim_end_matches('/'));
+            let resp = client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Ollama request failed: {}", e))?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            json["message"]["content"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .ok_or_else(|| format!("Unexpected Ollama response: {}", json))
+        }
+        other => Err(format!("Unknown AI backend: {}", other)),
+    }
 }
 
 // ─── M4: Auto-paste ───────────────────────────────────────────────────────────
@@ -2460,6 +2852,24 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
 
     state.recording.store(true, Ordering::SeqCst);
     state.audio_buffer.lock().unwrap().clear();
+
+    // Detect if the pressed hotkey maps to an AI profile
+    {
+        let profile_id = {
+            let hotkeys = state.profile_hotkeys.lock().unwrap();
+            hotkeys
+                .iter()
+                .find(|(_, hk)| hk.as_str() == shortcut.as_str())
+                .map(|(id, _)| id.clone())
+        };
+        let profile_name = profile_id
+            .as_deref()
+            .and_then(|id| PROFILES.iter().find(|p| p.id == id))
+            .map(|p| p.name)
+            .unwrap_or("");
+        *state.active_profile.lock().unwrap() = profile_id;
+        let _ = app.emit("active-profile-changed", profile_name);
+    }
 
     start_audio_capture(
         app.clone(),
@@ -2612,6 +3022,15 @@ pub fn run() {
             open_empty_state,
             get_autostart_enabled,
             set_autostart_enabled,
+            get_profiles,
+            get_ai_settings,
+            get_ai_default_mode,
+            set_ai_default_mode,
+            set_ai_backend,
+            set_ai_api_key,
+            set_ai_model,
+            set_ai_ollama_url,
+            set_profile_hotkey,
         ])
         .setup(move |app| {
             // Hide from macOS Dock — we're a menu bar app
