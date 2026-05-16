@@ -118,15 +118,15 @@ fn parse_candidate_text(body: GeminiResponse) -> Result<String, TransformError> 
 pub async fn transform(client: &Client, request: &TransformRequest) -> Result<String, TransformError> {
     let instruction = build_instruction(request);
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
         request.model.as_settings_value(),
-        request.api_key
     );
     let payload = build_request(&instruction, &request.transcript);
     let payload = serde_json::to_vec(&payload)
         .map_err(|e| TransformError::InvalidResponse(e.to_string()))?;
     let response = client
         .post(url)
+        .header("x-goog-api-key", &request.api_key)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(payload)
         .send()

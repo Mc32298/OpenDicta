@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import Waveform from "../components/Waveform";
 import { AlertIcon, CheckIcon, GearIcon, MicIcon, StopIcon, XIcon } from "../ui/icons";
 import { IconButton } from "../ui/controls";
@@ -14,7 +14,7 @@ export default function VoiceBar() {
   const [statusText, setStatusText] = useState("Ready");
   const [lastError, setLastError]   = useState<string | null>(null);
   const [level, setLevel]           = useState(0);
-  const [waveColor, setWaveColor]   = useState("#3082ff");
+  const [waveColor, setWaveColor]   = useState("#D4956A");
   const [shortcut, setShortcut]     = useState("RCtrl");
   const [elapsed, setElapsed]       = useState(0);
   const [completionSound, setCompletionSound] = useState(false);
@@ -32,6 +32,19 @@ export default function VoiceBar() {
     if (state !== "recording") { setElapsed(0); return; }
     const id = setInterval(() => setElapsed(e => e + 1), 1000);
     return () => clearInterval(id);
+  }, [state]);
+
+  // Resize the transparent Tauri window to match pill content width per state
+  useEffect(() => {
+    const widths: Record<State, number> = {
+      idle:       260,
+      recording:  320,
+      processing: 290,
+      done:       420,
+      error:      360,
+      cancelled:  240,
+    };
+    getCurrentWindow().setSize(new LogicalSize(widths[state], 62)).catch(console.error);
   }, [state]);
 
   // Keep completionSoundRef in sync with state
