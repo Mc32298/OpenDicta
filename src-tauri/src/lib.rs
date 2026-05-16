@@ -8,9 +8,6 @@
 //!   - voicenote-worker sidecar management (Parakeet TDT 0.6B v3 via sherpa-onnx)
 //!   - Auto-paste via enigo (types text into the active app)
 
-mod ai;
-
-use ai::{AiConfig, AiModel, AiPreset, AiProvider, TransformError};
 use std::io::Write;
 use std::path::Path;
 use rubato::{
@@ -28,15 +25,13 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-#[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::LocalFree,
-    Security::Cryptography::{
-        CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
-    },
-};
 
 const DEFAULT_SHORTCUT: &str = "ControlRight";
+const SETTINGS_WIDTH: f64 = 1360.0;
+const SETTINGS_HEIGHT: f64 = 860.0;
+const SETTINGS_MIN_WIDTH: f64 = 1180.0;
+const SETTINGS_MIN_HEIGHT: f64 = 760.0;
+const TRANSCRIPTION_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(target_os = "windows")]
 const VK_RCONTROL_CODE: i32 = 0xA3;
@@ -105,6 +100,10 @@ struct AppState {
     asr_backend: Arc<Mutex<String>>,
     /// Runtime profile for memory/performance tradeoff.
     runtime_profile: Arc<Mutex<String>>,
+    /// STT engine selection.
+    stt_engine: Arc<Mutex<String>>,
+    /// Preferred spoken input language ("auto" or engine-specific code).
+    stt_input_language: Arc<Mutex<String>>,
     /// ONNX execution provider: "cpu" | "cuda" | "directml"
     onnx_provider: Arc<Mutex<String>>,
     /// Runtime view of provider selection/effective backend.
@@ -127,6 +126,21 @@ struct AppState {
     profile_hotkeys: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// Profile currently being applied (set on profile hotkey press, cleared after paste)
     active_profile: Arc<Mutex<Option<String>>>,
+    /// Session totals used by dashboard cards.
+    dashboard_total_words: Arc<AtomicU64>,
+    dashboard_total_speaking_ms: Arc<AtomicU64>,
+    /// Simple in-memory transcript feed for the dashboard.
+    dashboard_history: Arc<Mutex<Vec<DashboardHistoryRow>>>,
+    /// Duration of the most recent recording waiting for transcript result.
+    pending_recording_ms: Arc<AtomicU64>,
+    /// Monotonic request id tracking for stuck-transcription recovery.
+    active_transcription_id: Arc<AtomicU64>,
+    transcription_seq: Arc<AtomicU64>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct DashboardHistoryRow {
+    text: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -161,6 +175,8 @@ impl AppState {
             asr_model: Arc::new(Mutex::new("small".to_string())),
             asr_backend: Arc::new(Mutex::new("faster-whisper".to_string())),
             runtime_profile: Arc::new(Mutex::new("balanced".to_string())),
+            stt_engine: Arc::new(Mutex::new("parakeet".to_string())),
+            stt_input_language: Arc::new(Mutex::new("auto".to_string())),
             onnx_provider: Arc::new(Mutex::new("cpu".to_string())),
             provider_runtime: Arc::new(Mutex::new(ProviderRuntimeStatus {
                 requested: "cpu".to_string(),
@@ -176,6 +192,12 @@ impl AppState {
             ai_ollama_url: Arc::new(Mutex::new("http://localhost:11434".to_string())),
             profile_hotkeys: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_profile: Arc::new(Mutex::new(None)),
+            dashboard_total_words: Arc::new(AtomicU64::new(0)),
+            dashboard_total_speaking_ms: Arc::new(AtomicU64::new(0)),
+            dashboard_history: Arc::new(Mutex::new(Vec::new())),
+            pending_recording_ms: Arc::new(AtomicU64::new(0)),
+            active_transcription_id: Arc::new(AtomicU64::new(0)),
+            transcription_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -310,52 +332,21 @@ async fn set_ai_backend(
     if !VALID.contains(&backend.as_str()) {
         return Err(format!("Unknown AI backend: {}", backend));
     }
-    // Bridge to the typed ai_provider field used by the execution engine.
-    let provider = match backend.as_str() {
-        "openai" => Some("openai".to_string()),
-        "gemini" => Some("gemini".to_string()),
-        _ => None,
-    };
     *state.ai_backend.lock().unwrap() = backend;
-    *state.ai_provider.lock().unwrap() = provider;
     save_app_settings(&app, state.inner().clone())
 }
 
 #[tauri::command]
-async fn set_ai_api_key(
-    app: AppHandle,
-    state: tauri::State<'_, SharedState>,
-    key: String,
-) -> Result<(), String> {
+async fn set_ai_api_key(key: String) -> Result<(), String> {
     let entry = keyring::Entry::new("voicenote", "ai_api_key").map_err(|e| e.to_string())?;
     if key.is_empty() {
-        let _ = entry.delete_credential();
+        entry.delete_credential().or_else(|e| match e {
+            keyring::Error::NoEntry => Ok(()),
+            other => Err(other.to_string()),
+        })
     } else {
-        entry.set_password(&key).map_err(|e| e.to_string())?;
+        entry.set_password(&key).map_err(|e| e.to_string())
     }
-    // Also store in the provider-specific keyring so the typed execution engine finds it.
-    let backend = state.ai_backend.lock().unwrap().clone();
-    let (provider_entry, state_slot) = match backend.as_str() {
-        "openai" => (Some(openai_keyring_entry()), Some("openai")),
-        "gemini" => (Some(gemini_keyring_entry()), Some("gemini")),
-        _ => (None, None),
-    };
-    if let Some(pe) = provider_entry {
-        if key.is_empty() {
-            let _ = pe.delete_credential();
-        } else {
-            pe.set_password(&key).map_err(|e| e.to_string())?;
-        }
-    }
-    if let Some(slot) = state_slot {
-        let val = if key.is_empty() { None } else { Some(key) };
-        match slot {
-            "openai" => *state.openai_api_key.lock().unwrap() = val,
-            "gemini" => *state.gemini_api_key.lock().unwrap() = val,
-            _ => {}
-        }
-    }
-    save_app_settings(&app, state.inner().clone())
 }
 
 #[tauri::command]
@@ -447,6 +438,16 @@ async fn stop_recording(
 }
 
 #[tauri::command]
+async fn start_recording(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<(), String> {
+    let shortcut = state.shortcut.lock().unwrap().clone();
+    handle_shortcut_pressed(app, state.inner().clone(), shortcut);
+    Ok(())
+}
+
+#[tauri::command]
 async fn cancel_recording(
     app: AppHandle,
     state: tauri::State<'_, SharedState>,
@@ -468,6 +469,39 @@ async fn check_for_updates() -> Result<(), String> {
     // TODO M8: wire up tauri-plugin-updater
     println!("Checking for updates...");
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct DashboardStats {
+    total_words: u64,
+    wpm: f64,
+    day_streak: u64,
+}
+
+#[tauri::command]
+async fn get_dashboard_stats(state: tauri::State<'_, SharedState>) -> Result<DashboardStats, String> {
+    let total_words = state.dashboard_total_words.load(Ordering::SeqCst);
+    let total_speaking_ms = state.dashboard_total_speaking_ms.load(Ordering::SeqCst);
+    let wpm = if total_words == 0 || total_speaking_ms == 0 {
+        0.0
+    } else {
+        let minutes = total_speaking_ms as f64 / 60_000.0;
+        if minutes <= 0.0 {
+            0.0
+        } else {
+            total_words as f64 / minutes
+        }
+    };
+    Ok(DashboardStats {
+        total_words,
+        wpm: (wpm * 10.0).round() / 10.0,
+        day_streak: 0,
+    })
+}
+
+#[tauri::command]
+async fn get_transcript_history(state: tauri::State<'_, SharedState>) -> Result<Vec<DashboardHistoryRow>, String> {
+    Ok(state.dashboard_history.lock().unwrap().clone())
 }
 
 #[tauri::command]
@@ -552,6 +586,10 @@ struct AppSettings {
     asr_backend: String,
     #[serde(default = "default_runtime_profile")]
     runtime_profile: String,
+    #[serde(default = "default_stt_engine")]
+    stt_engine: String,
+    #[serde(default = "default_stt_input_language")]
+    stt_input_language: String,
     #[serde(default = "default_onnx_provider")]
     onnx_provider: String,
     #[serde(default, skip_serializing)]
@@ -586,6 +624,14 @@ fn default_asr_backend() -> String {
 
 fn default_runtime_profile() -> String {
     "balanced".to_string()
+}
+
+fn default_stt_engine() -> String {
+    "parakeet".to_string()
+}
+
+fn default_stt_input_language() -> String {
+    "auto".to_string()
 }
 
 fn default_onnx_provider() -> String {
@@ -667,6 +713,59 @@ async fn set_runtime_profile(
     }
     *state.runtime_profile.lock().unwrap() = profile;
     save_app_settings(&app, state.inner().clone())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_stt_engine(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    Ok(state.stt_engine.lock().unwrap().clone())
+}
+
+#[tauri::command]
+async fn set_stt_engine(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    engine: String,
+) -> Result<(), String> {
+    let engine = engine.trim().to_lowercase();
+    if engine != "parakeet"
+        && engine != "parakeet_v2_en"
+        && engine != "whisper_large_v3"
+        && engine != "canary_qwen_2_5b"
+    {
+        return Err("Unsupported STT engine. Use parakeet, parakeet_v2_en, whisper_large_v3, or canary_qwen_2_5b".to_string());
+    }
+    if state.sidecar_busy.load(Ordering::SeqCst) {
+        return Err("Cannot change STT engine while transcribing".to_string());
+    }
+    *state.stt_engine.lock().unwrap() = engine;
+    save_app_settings(&app, state.inner().clone())?;
+    kill_sidecar(state.inner());
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_stt_input_language(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    Ok(state.stt_input_language.lock().unwrap().clone())
+}
+
+#[tauri::command]
+async fn set_stt_input_language(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    language: String,
+) -> Result<(), String> {
+    let language = language.trim().to_lowercase();
+    const VALID: &[&str] = &["auto", "en", "zh", "ja", "ko", "yue"];
+    if !VALID.contains(&language.as_str()) {
+        return Err("Unsupported input language. Use auto, en, zh, ja, ko, or yue".to_string());
+    }
+    if state.sidecar_busy.load(Ordering::SeqCst) {
+        return Err("Cannot change input language while transcribing".to_string());
+    }
+    *state.stt_input_language.lock().unwrap() = language;
+    save_app_settings(&app, state.inner().clone())?;
+    kill_sidecar(state.inner());
     Ok(())
 }
 
@@ -829,10 +928,78 @@ const DOWNLOAD_BASES: &[&str] = &[
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main",
 ];
 
+const PARAKEET_V2_EN_MODEL_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec {
+        name: "encoder.int8.onnx",
+        expected_bytes: 0,
+        sha256: None,
+    },
+    ModelFileSpec {
+        name: "decoder.int8.onnx",
+        expected_bytes: 0,
+        sha256: None,
+    },
+    ModelFileSpec {
+        name: "joiner.int8.onnx",
+        expected_bytes: 0,
+        sha256: None,
+    },
+    ModelFileSpec {
+        name: "tokens.txt",
+        expected_bytes: 0,
+        sha256: None,
+    },
+];
+
+const PARAKEET_V2_EN_DOWNLOAD_BASES: &[&str] = &[
+    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main",
+];
+
+const WHISPER_LARGE_V3_MODEL_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec { name: "large-v3-encoder.int8.onnx", expected_bytes: 0, sha256: None },
+    ModelFileSpec { name: "large-v3-decoder.int8.onnx", expected_bytes: 0, sha256: None },
+    ModelFileSpec { name: "large-v3-tokens.txt", expected_bytes: 0, sha256: None },
+];
+
+const WHISPER_LARGE_V3_DOWNLOAD_BASES: &[&str] = &[
+    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-large-v3/resolve/main",
+];
+
+const CANARY_QWEN_LOCAL_MODEL_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec { name: "encoder.int8.onnx", expected_bytes: 0, sha256: None },
+    ModelFileSpec { name: "decoder.int8.onnx", expected_bytes: 0, sha256: None },
+    ModelFileSpec { name: "tokens.txt", expected_bytes: 0, sha256: None },
+];
+
+const CANARY_QWEN_LOCAL_DOWNLOAD_BASES: &[&str] = &[
+    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8/resolve/main",
+];
+
 fn model_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|p| p.join("models").join("parakeet"))
+        .map_err(|e| e.to_string())
+}
+
+fn parakeet_v2_en_model_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|p| p.join("models").join("parakeet_v2_en"))
+        .map_err(|e| e.to_string())
+}
+
+fn whisper_large_v3_model_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|p| p.join("models").join("whisper_large_v3"))
+        .map_err(|e| e.to_string())
+}
+
+fn canary_qwen_model_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|p| p.join("models").join("canary_qwen_2_5b"))
         .map_err(|e| e.to_string())
 }
 
@@ -1022,6 +1189,288 @@ async fn download_model(
 
     let _ = app.emit("model-download-complete", ());
     Ok(())
+}
+
+#[tauri::command]
+async fn get_language_aware_model_status(app: AppHandle) -> Result<ModelStatus, String> {
+    let dir = parakeet_v2_en_model_data_dir(&app)?;
+    let mut files = Vec::new();
+    let mut all_present = true;
+
+    for spec in PARAKEET_V2_EN_MODEL_FILES {
+        let path = dir.join(spec.name);
+        let exists = path.exists();
+        let actual_bytes = if exists {
+            std::fs::metadata(&path).ok().map(|m| m.len())
+        } else {
+            None
+        };
+        if !exists {
+            all_present = false;
+        }
+        files.push(ModelFileInfo {
+            name: spec.name,
+            exists,
+            expected_bytes: spec.expected_bytes,
+            actual_bytes,
+        });
+    }
+
+    Ok(ModelStatus {
+        model_dir: dir.to_string_lossy().into_owned(),
+        files,
+        all_present,
+    })
+}
+
+#[tauri::command]
+async fn download_language_aware_model(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    use futures_util::StreamExt;
+
+    let dir = parakeet_v2_en_model_data_dir(&app)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Could not create model directory: {}", e))?;
+
+    let hf_token = state.hf_token.lock().unwrap().clone();
+    let client = reqwest::Client::builder()
+        .user_agent("voicenote/0.1 (sensevoice-downloader)")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let total_files = PARAKEET_V2_EN_MODEL_FILES.len();
+    for (idx, spec) in PARAKEET_V2_EN_MODEL_FILES.iter().enumerate() {
+        let name = spec.name;
+        let expected_size = spec.expected_bytes;
+        let dest = dir.join(name);
+        let tmp = dir.join(format!("{}.tmp", name));
+
+        if dest.exists() {
+            if let Ok(meta) = std::fs::metadata(&dest) {
+                let size_ok = name == "tokens.txt"
+                    || meta.len() >= (expected_size as f64 * 0.95) as u64;
+                if size_ok {
+                    let _ = app.emit("model-download-progress", DownloadProgress {
+                        file: name.to_string(),
+                        file_index: idx,
+                        file_total: total_files,
+                        file_bytes: meta.len(),
+                        file_size: expected_size,
+                        overall_percent: (((idx + 1) * 100) / total_files) as u8,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        let mut response = None;
+        let mut last_err = String::new();
+        for &base in PARAKEET_V2_EN_DOWNLOAD_BASES {
+            let url = format!("{}/{}", base, name);
+            let mut req = client.get(&url);
+            if let Some(ref token) = hf_token {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+            match req.send().await {
+                Err(e) => { last_err = format!("Network error: {}", e); }
+                Ok(r) if r.status().is_success() => { response = Some(r); break; }
+                Ok(r) => { last_err = format!("Server returned {} for {} ({})", r.status(), name, base); }
+            }
+        }
+        let response = response.ok_or_else(|| last_err)?;
+        let content_length = response.content_length().unwrap_or(expected_size.max(1));
+
+        let mut file = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|e| format!("Could not create temp file for {}: {}", name, e))?;
+        let mut downloaded: u64 = 0;
+        let mut stream = response.bytes_stream();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("Download interrupted for {}: {}", name, e))?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("Write error for {}: {}", name, e))?;
+            downloaded += chunk.len() as u64;
+
+            let overall = ((idx as f64 + downloaded as f64 / content_length as f64)
+                / total_files as f64
+                * 100.0) as u8;
+            let _ = app.emit("model-download-progress", DownloadProgress {
+                file: name.to_string(),
+                file_index: idx,
+                file_total: total_files,
+                file_bytes: downloaded,
+                file_size: content_length,
+                overall_percent: overall,
+            });
+        }
+
+        file.flush().await.map_err(|e| e.to_string())?;
+        drop(file);
+        tokio::fs::rename(&tmp, &dest)
+            .await
+            .map_err(|e| format!("Could not finalise {}: {}", name, e))?;
+    }
+
+    let _ = app.emit("model-download-complete", ());
+    Ok(())
+}
+
+#[tauri::command]
+async fn download_whisper_large_v3_model(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    use futures_util::StreamExt;
+
+    let dir = whisper_large_v3_model_data_dir(&app)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Could not create model directory: {}", e))?;
+    let hf_token = state.hf_token.lock().unwrap().clone();
+    let client = reqwest::Client::builder()
+        .user_agent("voicenote/0.1 (whisper-large-v3-downloader)")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let total_files = WHISPER_LARGE_V3_MODEL_FILES.len();
+    for (idx, spec) in WHISPER_LARGE_V3_MODEL_FILES.iter().enumerate() {
+        let name = spec.name;
+        let dest = dir.join(name);
+        let tmp = dir.join(format!("{}.tmp", name));
+        if dest.exists() {
+            let _ = app.emit("model-download-progress", DownloadProgress {
+                file: name.to_string(),
+                file_index: idx,
+                file_total: total_files,
+                file_bytes: std::fs::metadata(&dest).ok().map(|m| m.len()).unwrap_or(0),
+                file_size: std::fs::metadata(&dest).ok().map(|m| m.len()).unwrap_or(1),
+                overall_percent: (((idx + 1) * 100) / total_files) as u8,
+            });
+            continue;
+        }
+        let mut response = None;
+        let mut last_err = String::new();
+        for &base in WHISPER_LARGE_V3_DOWNLOAD_BASES {
+            let url = format!("{}/{}", base, name);
+            let mut req = client.get(&url);
+            if let Some(ref token) = hf_token {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+            match req.send().await {
+                Err(e) => { last_err = format!("Network error: {}", e); }
+                Ok(r) if r.status().is_success() => { response = Some(r); break; }
+                Ok(r) => { last_err = format!("Server returned {} for {} ({})", r.status(), name, base); }
+            }
+        }
+        let response = response.ok_or_else(|| last_err)?;
+        let content_length = response.content_length().unwrap_or(1);
+        let mut file = tokio::fs::File::create(&tmp).await.map_err(|e| format!("Could not create temp file for {}: {}", name, e))?;
+        let mut downloaded: u64 = 0;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("Download interrupted for {}: {}", name, e))?;
+            file.write_all(&chunk).await.map_err(|e| format!("Write error for {}: {}", name, e))?;
+            downloaded += chunk.len() as u64;
+            let overall = ((idx as f64 + downloaded as f64 / content_length as f64) / total_files as f64 * 100.0) as u8;
+            let _ = app.emit("model-download-progress", DownloadProgress {
+                file: name.to_string(), file_index: idx, file_total: total_files,
+                file_bytes: downloaded, file_size: content_length, overall_percent: overall,
+            });
+        }
+        file.flush().await.map_err(|e| e.to_string())?;
+        drop(file);
+        tokio::fs::rename(&tmp, &dest).await.map_err(|e| format!("Could not finalise {}: {}", name, e))?;
+    }
+    let _ = app.emit("model-download-complete", ());
+    Ok(())
+}
+
+#[tauri::command]
+async fn download_canary_qwen_model(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    use futures_util::StreamExt;
+
+    let dir = canary_qwen_model_data_dir(&app)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Could not create model directory: {}", e))?;
+    let hf_token = state.hf_token.lock().unwrap().clone();
+    let client = reqwest::Client::builder()
+        .user_agent("voicenote/0.1 (canary-downloader)")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let total_files = CANARY_QWEN_LOCAL_MODEL_FILES.len();
+    for (idx, spec) in CANARY_QWEN_LOCAL_MODEL_FILES.iter().enumerate() {
+        let name = spec.name;
+        let dest = dir.join(name);
+        let tmp = dir.join(format!("{}.tmp", name));
+        if dest.exists() {
+            let _ = app.emit("model-download-progress", DownloadProgress {
+                file: name.to_string(),
+                file_index: idx,
+                file_total: total_files,
+                file_bytes: std::fs::metadata(&dest).ok().map(|m| m.len()).unwrap_or(0),
+                file_size: std::fs::metadata(&dest).ok().map(|m| m.len()).unwrap_or(1),
+                overall_percent: (((idx + 1) * 100) / total_files) as u8,
+            });
+            continue;
+        }
+        let mut response = None;
+        let mut last_err = String::new();
+        for &base in CANARY_QWEN_LOCAL_DOWNLOAD_BASES {
+            let url = format!("{}/{}", base, name);
+            let mut req = client.get(&url);
+            if let Some(ref token) = hf_token {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+            match req.send().await {
+                Err(e) => { last_err = format!("Network error: {}", e); }
+                Ok(r) if r.status().is_success() => { response = Some(r); break; }
+                Ok(r) => { last_err = format!("Server returned {} for {} ({})", r.status(), name, base); }
+            }
+        }
+        let response = response.ok_or_else(|| last_err)?;
+        let content_length = response.content_length().unwrap_or(1);
+        let mut file = tokio::fs::File::create(&tmp).await.map_err(|e| format!("Could not create temp file for {}: {}", name, e))?;
+        let mut downloaded: u64 = 0;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("Download interrupted for {}: {}", name, e))?;
+            file.write_all(&chunk).await.map_err(|e| format!("Write error for {}: {}", name, e))?;
+            downloaded += chunk.len() as u64;
+            let overall = ((idx as f64 + downloaded as f64 / content_length as f64) / total_files as f64 * 100.0) as u8;
+            let _ = app.emit("model-download-progress", DownloadProgress {
+                file: name.to_string(), file_index: idx, file_total: total_files,
+                file_bytes: downloaded, file_size: content_length, overall_percent: overall,
+            });
+        }
+        file.flush().await.map_err(|e| e.to_string())?;
+        drop(file);
+        tokio::fs::rename(&tmp, &dest).await.map_err(|e| format!("Could not finalise {}: {}", name, e))?;
+    }
+    let _ = app.emit("model-download-complete", ());
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_stt_model_installed(app: AppHandle, engine: String) -> Result<bool, String> {
+    let engine = engine.trim().to_lowercase();
+    let (dir, files): (std::path::PathBuf, &[ModelFileSpec]) = match engine.as_str() {
+        "parakeet" => (model_data_dir(&app)?, MODEL_FILES),
+        "parakeet_v2_en" => (parakeet_v2_en_model_data_dir(&app)?, PARAKEET_V2_EN_MODEL_FILES),
+        "whisper_large_v3" => (whisper_large_v3_model_data_dir(&app)?, WHISPER_LARGE_V3_MODEL_FILES),
+        "canary_qwen_2_5b" => (canary_qwen_model_data_dir(&app)?, CANARY_QWEN_LOCAL_MODEL_FILES),
+        _ => return Err("Unknown engine".to_string()),
+    };
+    Ok(files.iter().all(|spec| dir.join(spec.name).exists()))
 }
 
 #[derive(serde::Serialize)]
@@ -1338,6 +1787,8 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         asr_model: state.asr_model.lock().unwrap().clone(),
         asr_backend: state.asr_backend.lock().unwrap().clone(),
         runtime_profile: state.runtime_profile.lock().unwrap().clone(),
+        stt_engine: state.stt_engine.lock().unwrap().clone(),
+        stt_input_language: state.stt_input_language.lock().unwrap().clone(),
         onnx_provider: state.onnx_provider.lock().unwrap().clone(),
         hf_token: None,
         onboarding_completed: state.onboarding_completed.load(Ordering::SeqCst),
@@ -1373,17 +1824,11 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     *state.asr_model.lock().unwrap() = settings.asr_model;
     *state.asr_backend.lock().unwrap() = settings.asr_backend;
     *state.runtime_profile.lock().unwrap() = settings.runtime_profile;
+    *state.stt_engine.lock().unwrap() = settings.stt_engine;
+    *state.stt_input_language.lock().unwrap() = settings.stt_input_language;
     *state.onnx_provider.lock().unwrap() = settings.onnx_provider;
-    *state.ai_preset.lock().unwrap() = settings.ai_preset;
-    *state.ai_provider.lock().unwrap() = settings.ai_provider;
-    *state.ai_model.lock().unwrap() = settings.ai_model;
-    *state.ai_target_language.lock().unwrap() = settings.ai_target_language;
     let keyring_token = load_hf_token_secret();
     *state.hf_token.lock().unwrap() = keyring_token.clone().or(settings.hf_token.clone());
-    *state.openai_api_key.lock().unwrap() =
-        load_ai_secret(app, "openai_api_key", openai_keyring_entry());
-    *state.gemini_api_key.lock().unwrap() =
-        load_ai_secret(app, "gemini_api_key", gemini_keyring_entry());
     if keyring_token.is_none() {
         if let Some(legacy) = settings.hf_token.as_deref() {
             if !legacy.trim().is_empty() {
@@ -1407,139 +1852,18 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
         let mut rt = state.provider_runtime.lock().unwrap();
         rt.requested = provider.clone();
         rt.effective = "unknown".to_string();
-        rt.message = format!("Configured provider is '{}'. Start recording to verify runtime backend.", provider);
+        rt.message = format!(
+            "Configured provider='{}', engine='{}', language='{}'. Start recording to verify runtime backend.",
+            provider,
+            state.stt_engine.lock().unwrap().clone(),
+            state.stt_input_language.lock().unwrap().clone()
+        );
     }
 }
 
 fn hf_token_keyring_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new("com.voicenote.app", "huggingface_token")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
-}
-
-fn openai_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.voicenote.app", "openai_api_key")
-        .map_err(|e| format!("Keyring initialization failed: {}", e))
-}
-
-fn gemini_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.voicenote.app", "gemini_api_key")
-        .map_err(|e| format!("Keyring initialization failed: {}", e))
-}
-
-fn ai_secret_file_path(app: &AppHandle, key: &str) -> Result<std::path::PathBuf, String> {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| format!("Failed to resolve app config dir: {}", e))?
-        .join("secrets");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create secrets dir: {}", e))?;
-    Ok(dir.join(format!("{key}.bin")))
-}
-
-#[cfg(windows)]
-fn protect_local_secret(plain: &[u8]) -> Result<Vec<u8>, String> {
-    if plain.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut input = CRYPT_INTEGER_BLOB {
-        cbData: plain.len() as u32,
-        pbData: plain.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
-    };
-    let ok = unsafe {
-        CryptProtectData(
-            &mut input,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output,
-        )
-    };
-    if ok == 0 {
-        return Err(format!(
-            "Failed to encrypt local secret: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let bytes =
-        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
-    unsafe {
-        LocalFree(output.pbData.cast());
-    }
-    Ok(bytes)
-}
-
-#[cfg(windows)]
-fn unprotect_local_secret(cipher: &[u8]) -> Result<Vec<u8>, String> {
-    if cipher.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut input = CRYPT_INTEGER_BLOB {
-        cbData: cipher.len() as u32,
-        pbData: cipher.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
-    };
-    let ok = unsafe {
-        CryptUnprotectData(
-            &mut input,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output,
-        )
-    };
-    if ok == 0 {
-        return Err(format!(
-            "Failed to decrypt local secret: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let bytes =
-        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
-    unsafe {
-        LocalFree(output.pbData.cast());
-    }
-    Ok(bytes)
-}
-
-#[cfg(windows)]
-fn save_local_encrypted_secret(path: &Path, value: Option<&str>) -> Result<(), String> {
-    match value {
-        Some(secret) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create secret directory: {}", e))?;
-            }
-            let payload = protect_local_secret(secret.as_bytes())?;
-            std::fs::write(path, payload)
-                .map_err(|e| format!("Failed to write encrypted secret: {}", e))
-        }
-        None => match std::fs::remove_file(path) {
-            Ok(_) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("Failed to delete encrypted secret: {}", e)),
-        },
-    }
-}
-
-#[cfg(windows)]
-fn load_local_encrypted_secret(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let plain = unprotect_local_secret(&bytes).ok()?;
-    let secret = String::from_utf8(plain).ok()?;
-    let trimmed = secret.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
 fn load_secret(entry: Result<keyring::Entry, String>) -> Option<String> {
@@ -1564,60 +1888,6 @@ fn save_secret(entry: Result<keyring::Entry, String>, value: Option<&str>) -> Re
             Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(format!("Failed to delete token from keyring: {}", e)),
         },
-    }
-}
-
-fn save_ai_secret(
-    app: &AppHandle,
-    key: &str,
-    entry: Result<keyring::Entry, String>,
-    value: Option<&str>,
-) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        let path = ai_secret_file_path(app, key)?;
-        save_local_encrypted_secret(&path, value)?;
-        let _ = save_secret(entry, None);
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = app;
-        let _ = key;
-        save_secret(entry, value)
-    }
-}
-
-fn load_ai_secret(
-    app: &AppHandle,
-    key: &str,
-    entry: Result<keyring::Entry, String>,
-) -> Option<String> {
-    #[cfg(windows)]
-    {
-        let path = ai_secret_file_path(app, key).ok()?;
-        if let Some(secret) = load_local_encrypted_secret(&path) {
-            return Some(secret);
-        }
-        let legacy = load_secret(entry);
-        if let Some(ref value) = legacy {
-            let _ = save_local_encrypted_secret(&path, Some(value));
-            let _ = save_secret(
-                match key {
-                    "openai_api_key" => openai_keyring_entry(),
-                    "gemini_api_key" => gemini_keyring_entry(),
-                    _ => return legacy,
-                },
-                None,
-            );
-        }
-        legacy
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = app;
-        let _ = key;
-        load_secret(entry)
     }
 }
 
@@ -1719,6 +1989,11 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
         None => "/?window=settings".to_string(),
     };
     if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.set_min_size(Some(tauri::LogicalSize::new(
+            SETTINGS_MIN_WIDTH,
+            SETTINGS_MIN_HEIGHT,
+        )));
+        let _ = win.set_size(tauri::LogicalSize::new(SETTINGS_WIDTH, SETTINGS_HEIGHT));
         let _ = win.center();
         let _ = win.show();
         let _ = win.set_focus();
@@ -1732,8 +2007,9 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
             tauri::WebviewUrl::App(url.into()),
         )
         .title("Settings")
-        .inner_size(640.0, 560.0)
-        .resizable(false)
+        .inner_size(SETTINGS_WIDTH, SETTINGS_HEIGHT)
+        .min_inner_size(SETTINGS_MIN_WIDTH, SETTINGS_MIN_HEIGHT)
+        .resizable(true)
         .decorations(false)
         .transparent(true)
         .center()
@@ -2036,6 +2312,9 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     // 4b. Fast no-speech guard: skip worker call for extremely short or silent input.
     // This avoids getting stuck in "Transcribing..." when the user only tapped the key.
     let duration_sec = samples_16khz.len() as f32 / 16_000.0;
+    state
+        .pending_recording_ms
+        .store((duration_sec.max(0.0) * 1000.0).round() as u64, Ordering::SeqCst);
     let rms = if samples_16khz.is_empty() {
         0.0
     } else {
@@ -2090,11 +2369,35 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
                 .ok();
                 hide_voicebar(&app);
                 state.sidecar_busy.store(false, Ordering::SeqCst);
+                return;
             }
+            let request_id = state
+                .transcription_seq
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
             state.sidecar_busy.store(true, Ordering::SeqCst);
+            state
+                .active_transcription_id
+                .store(request_id, Ordering::SeqCst);
             state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
             state.sidecar_standby.store(false, Ordering::SeqCst);
             *state.last_wav_path.lock().unwrap() = Some(wav_path.clone());
+            let state_for_timeout = state.clone();
+            let app_for_timeout = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(TRANSCRIPTION_TIMEOUT_MS)).await;
+                let same_request = state_for_timeout.active_transcription_id.load(Ordering::SeqCst) == request_id;
+                let still_busy = state_for_timeout.sidecar_busy.load(Ordering::SeqCst);
+                if same_request && still_busy {
+                    let _ = app_for_timeout.emit(
+                        "transcription-error",
+                        serde_json::json!({"message": "Transcription timed out. Restarting STT engine."}),
+                    );
+                    hide_voicebar(&app_for_timeout);
+                    kill_sidecar(&state_for_timeout);
+                    finish_transcript_request(&state_for_timeout);
+                }
+            });
             // Transcript will arrive as a "transcript-ready" event from the
             // background stdout-reader thread (see spawn_sidecar below)
         }
@@ -2186,52 +2489,10 @@ fn worker_binary_path() -> std::path::PathBuf {
     std::path::PathBuf::from(bin_name)
 }
 
-fn current_ai_config(state: &SharedState) -> AiConfig {
-    let preset = state.ai_preset.lock().unwrap().clone();
-    let provider = state
-        .ai_provider
-        .lock()
-        .unwrap()
-        .clone()
-        .and_then(|value| AiProvider::from_settings_value(&value));
-    let model = state
-        .ai_model
-        .lock()
-        .unwrap()
-        .clone()
-        .and_then(|value| AiModel::from_settings_value(&value));
-    let target_language = state.ai_target_language.lock().unwrap().clone();
-    AiConfig {
-        preset: AiPreset::from_settings_value(&preset).unwrap_or(AiPreset::Raw),
-        provider,
-        model,
-        target_language,
-    }
-}
-
-fn current_provider_key(state: &SharedState, provider: AiProvider) -> Option<String> {
-    match provider {
-        AiProvider::OpenAi => state.openai_api_key.lock().unwrap().clone(),
-        AiProvider::Gemini => state.gemini_api_key.lock().unwrap().clone(),
-    }
-}
-
-async fn transform_transcript_if_enabled(
-    state: SharedState,
-    transcript: String,
-) -> Result<String, TransformError> {
-    let config = current_ai_config(&state);
-    let provider = config.provider;
-    let api_key = provider.and_then(|value| current_provider_key(&state, value));
-    let request = match ai::validate_transform_input(&config, &transcript, api_key.as_deref())? {
-        Some(request) => request,
-        None => return Ok(transcript),
-    };
-    ai::transform_with_provider(&state.http_client, &request).await
-}
 
 fn finish_transcript_request(state: &SharedState) {
     state.sidecar_busy.store(false, Ordering::SeqCst);
+    state.active_transcription_id.store(0, Ordering::SeqCst);
     state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
     if let Some(path) = state.last_wav_path.lock().unwrap().take() {
         let _ = std::fs::remove_file(&path);
@@ -2279,6 +2540,8 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
     command
         .env("VOICENOTE_PROVIDER", &provider)
         .env("VOICENOTE_MODEL_DIR", &model_dir)
+        .env("VOICENOTE_STT_ENGINE", state.stt_engine.lock().unwrap().clone())
+        .env("VOICENOTE_INPUT_LANG", state.stt_input_language.lock().unwrap().clone())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2365,6 +2628,12 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                 Ok(text) if text.starts_with("TRANSCRIPT:") => {
                     let transcript = text["TRANSCRIPT:".len()..].trim().to_string();
                     if transcript.is_empty() {
+                        let _ = app_stdout.emit(
+                            "transcription-error",
+                            serde_json::json!({"message": "No speech detected. Try speaking while holding the shortcut."}),
+                        );
+                        hide_voicebar(&app_stdout);
+                        finish_transcript_request(&state_for_stdout);
                         continue;
                     }
                     #[cfg(debug_assertions)]
@@ -2430,6 +2699,27 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     paste_text(&final_text);
 
                     // Notify the Voice Bar UI
+                    let words = transcript
+                        .split_whitespace()
+                        .filter(|w| !w.trim().is_empty())
+                        .count() as u64;
+                    let duration_ms = state_for_stdout.pending_recording_ms.swap(0, Ordering::SeqCst);
+                    if words > 0 {
+                        state_for_stdout
+                            .dashboard_total_words
+                            .fetch_add(words, Ordering::SeqCst);
+                        if duration_ms > 0 {
+                            state_for_stdout
+                                .dashboard_total_speaking_ms
+                                .fetch_add(duration_ms, Ordering::SeqCst);
+                        }
+                        let mut history = state_for_stdout.dashboard_history.lock().unwrap();
+                        history.insert(0, DashboardHistoryRow { text: final_text.clone() });
+                        if history.len() > 16 {
+                            history.truncate(16);
+                        }
+                    }
+
                     let _ = app_stdout.emit(
                         "transcript-ready",
                         serde_json::json!({ "text": final_text }),
@@ -2449,6 +2739,16 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     break;
                 }
             }
+        }
+        *state_for_stdout.sidecar_stdin.lock().unwrap() = None;
+        *state_for_stdout.sidecar_child.lock().unwrap() = None;
+        if state_for_stdout.sidecar_busy.load(Ordering::SeqCst) {
+            let _ = app_stdout.emit(
+                "transcription-error",
+                serde_json::json!({"message": "STT engine stopped unexpectedly. Please try again."}),
+            );
+            hide_voicebar(&app_stdout);
+            finish_transcript_request(&state_for_stdout);
         }
     });
 
@@ -2877,20 +3177,27 @@ pub fn run() {
         ))
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
+            start_recording,
             stop_recording,
             cancel_recording,
             check_for_updates,
+            get_dashboard_stats,
+            get_transcript_history,
             get_shortcut,
             get_waveform_color,
             get_asr_model,
             get_asr_backend,
             get_runtime_profile,
+            get_stt_engine,
+            get_stt_input_language,
             get_shortcut_status,
             set_shortcut,
             set_waveform_color,
             set_asr_model,
             set_asr_backend,
             set_runtime_profile,
+            set_stt_engine,
+            set_stt_input_language,
             set_voicebar_position,
             reset_voicebar_position,
             get_audio_input_info,
@@ -2903,7 +3210,12 @@ pub fn run() {
             set_debug_mic_level,
             run_health_check,
             get_model_status,
+            get_language_aware_model_status,
+            get_stt_model_installed,
             download_model,
+            download_language_aware_model,
+            download_whisper_large_v3_model,
+            download_canary_qwen_model,
             get_onnx_provider,
             get_provider_runtime_status,
             set_onnx_provider,
@@ -2975,8 +3287,9 @@ pub fn run() {
                             tauri::WebviewUrl::App("/?window=settings".into()),
                         )
                         .title("Settings")
-                        .inner_size(640.0, 560.0)
-                        .resizable(false)
+                        .inner_size(SETTINGS_WIDTH, SETTINGS_HEIGHT)
+                        .min_inner_size(SETTINGS_MIN_WIDTH, SETTINGS_MIN_HEIGHT)
+                        .resizable(true)
                         .decorations(false)
                         .transparent(true)
                         .position(-32000.0, -32000.0)
@@ -3059,63 +3372,6 @@ pub fn run() {
 #[cfg(test)]
 mod ai_settings_tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn default_ai_preset_is_raw() {
-        assert_eq!(default_ai_preset(), "raw");
-    }
-
-    #[test]
-    fn ai_provider_validation_accepts_supported_values() {
-        assert!(AiProvider::from_settings_value("openai").is_some());
-        assert!(AiProvider::from_settings_value("gemini").is_some());
-        assert!(AiProvider::from_settings_value("other").is_none());
-    }
-
-    #[test]
-    fn current_ai_config_reads_state_values() {
-        let state: SharedState = Arc::new(AppState::new());
-        *state.ai_preset.lock().unwrap() = "clean_translate".to_string();
-        *state.ai_provider.lock().unwrap() = Some("gemini".to_string());
-        *state.ai_model.lock().unwrap() = Some("gemini-3-flash-preview".to_string());
-        *state.ai_target_language.lock().unwrap() = Some("Danish".to_string());
-
-        let config = current_ai_config(&state);
-
-        assert_eq!(config.preset, AiPreset::CleanTranslate);
-        assert_eq!(config.provider, Some(AiProvider::Gemini));
-        assert_eq!(config.model, Some(ai::AiModel::Gemini3FlashPreview));
-        assert_eq!(config.target_language.as_deref(), Some("Danish"));
-    }
-
-    #[test]
-    fn current_provider_key_reads_only_selected_provider() {
-        let state: SharedState = Arc::new(AppState::new());
-        *state.openai_api_key.lock().unwrap() = Some("openai-key".to_string());
-        *state.gemini_api_key.lock().unwrap() = Some("gemini-key".to_string());
-
-        assert_eq!(
-            current_provider_key(&state, AiProvider::OpenAi).as_deref(),
-            Some("openai-key")
-        );
-        assert_eq!(
-            current_provider_key(&state, AiProvider::Gemini).as_deref(),
-            Some("gemini-key")
-        );
-    }
-
-    #[tokio::test]
-    async fn transform_transcript_if_enabled_returns_raw_transcript_when_disabled() {
-        let state: SharedState = Arc::new(AppState::new());
-
-        let result = transform_transcript_if_enabled(state, "hej verden".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(result, "hej verden");
-    }
-
     #[test]
     fn finish_transcript_request_clears_busy_and_cleans_up_wav_path() {
         let state: SharedState = Arc::new(AppState::new());
@@ -3131,23 +3387,4 @@ mod ai_settings_tests {
         assert!(state.last_wav_path.lock().unwrap().is_none());
     }
 
-    #[test]
-    #[cfg(windows)]
-    fn local_ai_secret_round_trips_and_deletes() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let base = std::env::temp_dir().join(format!("voicenote-secret-test-{unique}"));
-        let path = base.join("openai_api_key.bin");
-
-        save_local_encrypted_secret(&path, Some("sk-test-secret")).unwrap();
-        assert_eq!(
-            load_local_encrypted_secret(&path).as_deref(),
-            Some("sk-test-secret")
-        );
-
-        save_local_encrypted_secret(&path, None).unwrap();
-        assert_eq!(load_local_encrypted_secret(&path), None);
-    }
 }
