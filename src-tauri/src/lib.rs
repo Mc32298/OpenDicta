@@ -3165,7 +3165,7 @@ mod ai_settings_tests {
 
     #[test]
     fn default_ai_preset_is_raw() {
-        assert_eq!(default_ai_preset(), "raw");
+        assert_eq!(default_ai_model(), "raw");
     }
 
     #[test]
