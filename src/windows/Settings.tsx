@@ -1,481 +1,1138 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ActivityIcon, BoxIcon, GearIcon, KeyboardIcon, MicIcon, PaletteIcon } from "../ui/icons";
+import type { AiDefaultMode, AiSettings, HealthStatus, Page, ProfileInfo, ProviderRuntimeStatus, ShortcutStatus } from "./settingsTypes";
+import { Button, SettingsRow, SettingsSection, StatusBadge, ToggleSwitch } from "../ui/controls";
+import { ToastProvider, useToast } from "../ui/toast";
+import { ActivityIcon, BoxIcon, GearIcon, InfoIcon, KeyboardIcon, MicIcon, PaletteIcon } from "../ui/icons";
+import { DEFAULT_SHORTCUT, normalizeShortcutFromEvent } from "../lib/shortcutUtils";
 
-type DashboardPage = "home" | "insights" | "dictionary" | "ai" | "style" | "transforms" | "settings";
-type SttEngine = "parakeet" | "parakeet_v2_en" | "canary_qwen_2_5b";
-type InstalledMap = Record<SttEngine, boolean>;
-type IntervalScope = "today" | "week";
-type TranscriptReadyPayload = { text: string; timestamp?: string };
-
-type DashboardData = {
-  metrics: { totalWords: number; wpm: number; dayStreak: number };
-  activity: Array<{ timestamp: string; text: string }>;
-  notices: string[];
-};
-
-type ProfilePreset = {
-  id: string;
-  name: string;
-  description: string;
-  hotkey: string;
-};
-type StylePreset = {
-  id: string;
-  name: string;
-  instruction: string;
-  builtIn: boolean;
-};
-
-const STT_MODEL_OPTIONS: Array<{ id: SttEngine; title: string; subtitle: string; size: string; command: string | null }> = [
-  { id: "parakeet", title: "Parakeet Multilingual", subtitle: "Default and recommended", size: "1.1 GB", command: "download_model" },
-  { id: "parakeet_v2_en", title: "Parakeet v2 English", subtitle: "English-only variant", size: "1.1 GB", command: "download_language_aware_model" },
-  { id: "canary_qwen_2_5b", title: "Canary Qwen 2.5B", subtitle: "Local compatible canary package", size: "Medium", command: "download_canary_qwen_model" },
-];
-
-const PAGE_ALIASES: Record<string, DashboardPage> = {
-  home: "home",
-  insights: "insights",
-  dictionary: "dictionary",
-  snippets: "ai",
+const PAGE_ALIASES: Record<string, Page> = {
+  general: "general",
+  shortcuts: "shortcut",
+  keyboard: "shortcut",
+  shortcut: "shortcut",
+  mic: "microphone",
+  microphone: "microphone",
+  model: "model",
+  models: "model",
   ai: "ai",
-  style: "style",
-  transforms: "transforms",
-  settings: "settings",
-  diagnostics: "settings",
+  appearance: "appearance",
+  diagnostics: "diagnostics",
+  about: "about",
 };
 
-const NAV_ITEMS: Array<{ id: DashboardPage; label: string; icon: React.ReactNode }> = [
-  { id: "home", label: "Home", icon: <GearIcon /> },
-  { id: "insights", label: "Insights", icon: <ActivityIcon /> },
-  { id: "dictionary", label: "Dictionary", icon: <BoxIcon /> },
-  { id: "ai", label: "AI", icon: <KeyboardIcon /> },
-  { id: "style", label: "Style", icon: <PaletteIcon /> },
-  { id: "transforms", label: "Transforms", icon: <MicIcon /> },
-  { id: "settings", label: "Settings", icon: <GearIcon /> },
-];
-
-const PROFILE_PRESETS: ProfilePreset[] = [
-  { id: "fix_grammar", name: "Fix Grammar", description: "Clean punctuation and grammar before paste", hotkey: "" },
-  { id: "summarize", name: "Summarize", description: "Condense transcript to a short summary", hotkey: "" },
-  { id: "bullet_points", name: "Bullet Points", description: "Convert transcript to concise bullets", hotkey: "" },
-  { id: "make_formal", name: "Make Formal", description: "Rewrite in a formal professional tone", hotkey: "" },
-  { id: "prompt_builder", name: "Prompt Builder", description: "Transform transcript into a strong LLM prompt", hotkey: "" },
-];
-const STYLE_PRESETS: StylePreset[] = [
-  { id: "natural", name: "Natural", instruction: "Keep text natural and clean.", builtIn: true },
-  { id: "professional", name: "Professional", instruction: "Rewrite in professional tone.", builtIn: true },
-  { id: "concise", name: "Concise", instruction: "Shorten while preserving meaning.", builtIn: true },
-  { id: "friendly", name: "Friendly", instruction: "Keep it warm and friendly.", builtIn: true },
-  { id: "prompt", name: "Prompt-ready", instruction: "Turn into high quality LLM prompt.", builtIn: true },
-  { id: "email", name: "Email-ready", instruction: "Turn into clear professional email.", builtIn: true },
-];
-
-async function safeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
-  try {
-    return await invoke<T>(command, args);
-  } catch {
-    return null;
-  }
+function normalizePage(input: string | null): Page {
+  if (!input) return "general";
+  return PAGE_ALIASES[input] ?? "general";
 }
 
-function getInitialPage(): DashboardPage {
-  const page = new URLSearchParams(window.location.search).get("page");
-  if (!page) return "home";
-  return PAGE_ALIASES[page] ?? "home";
+function getInitialPage(): Page {
+  const params = new URLSearchParams(window.location.search);
+  return normalizePage(params.get("page"));
 }
 
-function formatTime(value?: string) {
-  if (!value) return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function countWords(input: string) {
-  return input.trim().split(/\s+/).filter(Boolean).length;
-}
 
 export default function Settings() {
-  const [activePage, setActivePage] = useState<DashboardPage>(getInitialPage);
-  const [dashboard, setDashboard] = useState<DashboardData>({ metrics: { totalWords: 0, wpm: 0, dayStreak: 0 }, activity: [], notices: [] });
-  const [toast, setToast] = useState<string | null>(null);
-  const [scope, setScope] = useState<IntervalScope>("today");
-  const [feedFilter, setFeedFilter] = useState<"all" | "favorites">("all");
-  const [favorites, setFavorites] = useState<string[]>([]);
+  const [page, setPage] = useState<Page>(getInitialPage);
+  const [accent, setAccent] = useState("#0A84FF");
 
-  const [aiProvider, setAiProvider] = useState<"openai" | "anthropic" | "gemini" | "ollama">("openai");
-  const [aiModel, setAiModel] = useState("gpt-4o-mini");
-  const [openAiKey, setOpenAiKey] = useState("");
-  const [claudeKey, setClaudeKey] = useState("");
-  const [geminiKey, setGeminiKey] = useState("");
-  const [showKey, setShowKey] = useState<{ openai: boolean; claude: boolean; gemini: boolean }>({ openai: false, claude: false, gemini: false });
-  const [presets, setPresets] = useState<ProfilePreset[]>(PROFILE_PRESETS);
-  const [dictionary, setDictionary] = useState<string[]>([]);
-  const [dictSearch, setDictSearch] = useState("");
-  const [dictDraft, setDictDraft] = useState("");
-  const [stylePresets, setStylePresets] = useState<StylePreset[]>(STYLE_PRESETS);
-  const [selectedStyleId, setSelectedStyleId] = useState("natural");
-  const [styleSample, setStyleSample] = useState("Please rewrite this transcript as a better prompt.");
-  const [stylePreview, setStylePreview] = useState("");
-
-  const [sttEngine, setSttEngine] = useState<SttEngine>("parakeet");
-  const [sttBusy, setSttBusy] = useState(false);
-  const [installed, setInstalled] = useState<InstalledMap>({ parakeet: false, parakeet_v2_en: false, canary_qwen_2_5b: false });
-  const [downloadingModel, setDownloadingModel] = useState<SttEngine | null>(null);
+  const closeSettings = () => {
+    void getCurrentWindow().hide();
+  };
 
   useEffect(() => {
     void getCurrentWindow().setFocus();
   }, []);
 
   useEffect(() => {
-    const load = async () => {
-      const [rawMetrics, rawActivity] = await Promise.all([
-        safeInvoke<Record<string, unknown>>("get_dashboard_stats"),
-        safeInvoke<Array<Record<string, unknown>>>("get_transcript_history"),
-      ]);
-      setDashboard({
-        metrics: {
-          totalWords: typeof rawMetrics?.total_words === "number" ? rawMetrics.total_words : 0,
-          wpm: typeof rawMetrics?.wpm === "number" ? rawMetrics.wpm : 0,
-          dayStreak: typeof rawMetrics?.day_streak === "number" ? rawMetrics.day_streak : 0,
-        },
-        activity: (rawActivity ?? []).map((entry) => ({ timestamp: formatTime(), text: typeof entry.text === "string" ? entry.text : "" })).filter((r) => r.text.trim().length > 0).slice(0, 24),
-        notices: rawMetrics ? [] : ["Metrics unavailable. Showing placeholders."],
-      });
-
-      const engine = await safeInvoke<string>("get_stt_engine");
-      if (engine === "parakeet" || engine === "parakeet_v2_en" || engine === "canary_qwen_2_5b") setSttEngine(engine);
-      const [a, b, c] = await Promise.all([
-        safeInvoke<boolean>("get_stt_model_installed", { engine: "parakeet" }),
-        safeInvoke<boolean>("get_stt_model_installed", { engine: "parakeet_v2_en" }),
-        safeInvoke<boolean>("get_stt_model_installed", { engine: "canary_qwen_2_5b" }),
-      ]);
-      setInstalled({ parakeet: a === true, parakeet_v2_en: b === true, canary_qwen_2_5b: c === true });
-
-      const profileInfo = await safeInvoke<Array<{ id: string; hotkey: string | null }>>("get_profiles");
-      if (profileInfo) {
-        setPresets((prev) =>
-          prev.map((item) => {
-            const found = profileInfo.find((p) => p.id === item.id);
-            return found ? { ...item, hotkey: found.hotkey ?? "" } : item;
-          }),
-        );
-      }
-    };
-    void load();
-
-    const unlistenNav = listen<string>("navigate-to-page", (event) => {
-      setActivePage(PAGE_ALIASES[event.payload] ?? "home");
+    const unlisten = listen<string>("navigate-to-page", (event) => {
+      setPage(normalizePage(event.payload));
     });
-    const unlistenTranscript = listen<TranscriptReadyPayload>("transcript-ready", (event) => {
-      const text = event.payload?.text?.trim();
-      if (!text) return;
-      setDashboard((prev) => ({
-        ...prev,
-        metrics: { ...prev.metrics, totalWords: prev.metrics.totalWords + countWords(text) },
-        activity: [{ timestamp: formatTime(event.payload?.timestamp), text }, ...prev.activity].slice(0, 24),
-      }));
-    });
-
     return () => {
-      unlistenNav.then((fn) => fn());
-      unlistenTranscript.then((fn) => fn());
+      unlisten.then((fn) => fn());
     };
   }, []);
 
   useEffect(() => {
-    if (!toast) return;
-    const timer = window.setTimeout(() => setToast(null), 1800);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
+    const root = document.documentElement;
+    root.style.setProperty("--ac", accent);
+  }, [accent]);
 
-  const onMinimize = () => void getCurrentWindow().minimize();
-  const onMaximize = () => void getCurrentWindow().toggleMaximize();
-  const onClose = () => void getCurrentWindow().close();
+  useEffect(() => {
+    void invoke<string>("get_waveform_color").then(setAccent).catch(console.error);
+  }, []);
 
-  const visibleActivity = useMemo(() => {
-    return feedFilter === "favorites" ? dashboard.activity.filter((row) => favorites.includes(row.text)) : dashboard.activity;
-  }, [dashboard.activity, feedFilter, favorites]);
-  const filteredDictionary = useMemo(() => {
-    const q = dictSearch.trim().toLowerCase();
-    const sorted = [...dictionary].sort((a, b) => a.localeCompare(b));
-    return q ? sorted.filter((w) => w.toLowerCase().includes(q)) : sorted;
-  }, [dictSearch, dictionary]);
-  const selectedStyle = useMemo(() => stylePresets.find((p) => p.id === selectedStyleId) ?? stylePresets[0], [stylePresets, selectedStyleId]);
+  return (
+    <div className="wv-settings" data-appearance="light" data-variant="warm">
+      <div className="wv-chrome">
+        <div className="wv-traffic">
+          <button aria-label="Close settings" onClick={closeSettings} style={{ background: "#FF5F57" }} />
+          <button aria-label="Hide settings" onClick={closeSettings} style={{ background: "#FEBC2E" }} />
+          <button aria-label="Settings status" type="button" style={{ background: "#28C840" }} disabled />
+        </div>
+        <div className="wv-chrome-title">VoiceNote Settings</div>
+        <div className="wv-chrome-spacer" />
+      </div>
+      <div className="wv-body">
+        <Sidebar active={page} onSelect={setPage} />
+        <main className="wv-main">
+          <ToastProvider>
+            <div style={{ display: page === "general" ? "" : "none" }}><GeneralTab /></div>
+            <div style={{ display: page === "shortcut" ? "" : "none" }}><ShortcutTab /></div>
+            <div style={{ display: page === "microphone" ? "" : "none" }}><MicrophoneTab accent={accent} onAccentChange={setAccent} /></div>
+            <div style={{ display: page === "model" ? "" : "none" }}><ModelTab /></div>
+            <div style={{ display: page === "appearance" ? "" : "none" }}><AppearanceTab accent={accent} onAccentChange={setAccent} /></div>
+            <div style={{ display: page === "ai" ? "" : "none" }}><AiTab /></div>
+            <div style={{ display: page === "diagnostics" ? "" : "none" }}><DiagnosticsTab /></div>
+            <div style={{ display: page === "about" ? "" : "none" }}><AboutTab onNavigate={setPage} /></div>
+          </ToastProvider>
+        </main>
+      </div>
+    </div>
+  );
+}
 
-  const saveProvider = async () => {
-    if (openAiKey.trim()) await safeInvoke("set_ai_api_key", { key: openAiKey.trim() });
-    if (claudeKey.trim()) await safeInvoke("set_ai_provider_api_key", { provider: "anthropic", key: claudeKey.trim() });
-    if (geminiKey.trim()) await safeInvoke("set_ai_provider_api_key", { provider: "gemini", key: geminiKey.trim() });
-    await safeInvoke("set_ai_backend", { backend: aiProvider });
-    await safeInvoke("set_ai_model", { model: aiModel });
-    setToast("AI settings saved");
+function PaneHeader({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div className="wv-pane-head">
+      <div>
+        <div className="wv-pane-title">{title}</div>
+        <div className="wv-pane-sub">{subtitle}</div>
+      </div>
+    </div>
+  );
+}
+
+function ChoiceGroup({
+  children,
+  compact = false,
+}: {
+  children: React.ReactNode;
+  compact?: boolean;
+}) {
+  return (
+    <div className="wv-choice-group" data-compact={compact ? "1" : "0"}>
+      {children}
+    </div>
+  );
+}
+
+function ChoiceButton({
+  active,
+  onClick,
+  disabled,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="wv-choice-btn"
+      data-active={active ? "1" : "0"}
+      aria-pressed={active}
+      onClick={onClick}
+      disabled={disabled}
+    >
+      {children}
+    </button>
+  );
+}
+
+
+function Sidebar({ active, onSelect }: { active: Page; onSelect: (page: Page) => void }) {
+  const tabs: Array<{ id: Page; label: string; icon: React.ReactNode }> = [
+    { id: "general", label: "General", icon: <GearIcon /> },
+    { id: "shortcut", label: "Shortcut", icon: <KeyboardIcon /> },
+    { id: "microphone", label: "Microphone", icon: <MicIcon /> },
+    { id: "model", label: "Model", icon: <BoxIcon /> },
+    { id: "ai", label: "AI", icon: <ActivityIcon /> },
+    { id: "appearance", label: "Appearance", icon: <PaletteIcon /> },
+    { id: "diagnostics", label: "Diagnostics", icon: <ActivityIcon /> },
+    { id: "about", label: "About", icon: <InfoIcon /> },
+  ];
+
+  return (
+    <aside className="wv-sidebar">
+      <div className="wv-sidebar-head">
+        <span className="wv-brand-mark"><MicIcon /></span>
+        <div className="wv-brand-block">
+          <div className="wv-brand-name">VoiceNote</div>
+          <div className="wv-brand-ver">Version 0.1.0</div>
+        </div>
+      </div>
+      <nav className="wv-nav">
+        {tabs.map((t) => (
+          <button
+            type="button"
+            key={t.id}
+            className="wv-nav-item"
+            data-active={t.id === active ? "1" : "0"}
+            aria-current={t.id === active ? "page" : undefined}
+            onClick={() => onSelect(t.id)}
+          >
+            <span className="wv-nav-icon">{t.icon}</span>
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </nav>
+    </aside>
+  );
+}
+
+function GeneralTab() {
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [profile, setProfile] = useState<string>("balanced");
+  const [completionSound, setCompletionSound] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const { showErr, showOk } = useToast();
+
+  useEffect(() => {
+    void invoke<boolean>("get_autostart_enabled")
+      .then(setLaunchAtLogin)
+      .catch((e) => showErr(`Could not load launch-at-login: ${String(e)}`));
+    void invoke<string>("get_runtime_profile")
+      .then(setProfile)
+      .catch((e) => showErr(`Could not load recording profile: ${String(e)}`));
+    void invoke<boolean>("get_completion_sound")
+      .then(setCompletionSound)
+      .catch((e) => showErr(`Could not load completion sound: ${String(e)}`));
+  }, []);
+
+  const toggleLaunchAtLogin = async () => {
+    const next = !launchAtLogin;
+    setBusy(true);
+    try {
+      await invoke("set_autostart_enabled", { enabled: next });
+      setLaunchAtLogin(next);
+      showOk(`Launch at login ${next ? "enabled" : "disabled"}.`);
+    } catch (e) {
+      showErr(`Failed to change launch-at-login: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const setPresetHotkey = async (presetId: string, hotkey: string) => {
-    setPresets((prev) => prev.map((p) => (p.id === presetId ? { ...p, hotkey } : p)));
-    const ok = await safeInvoke("set_profile_hotkey", { profileId: presetId, hotkey: hotkey.trim() ? hotkey.trim() : null });
-    if (ok == null) setToast("Could not save hotkey. It is local only.");
+  const changeProfile = async (v: string) => {
+    setBusy(true);
+    try {
+      await invoke("set_runtime_profile", { profile: v });
+      setProfile(v);
+      showOk("Recording profile updated.");
+    } catch (e) {
+      showErr(`Failed to change recording profile: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const onSttEngineChange = async (next: SttEngine) => {
-    if (next === sttEngine) return;
-    if (!installed[next]) return setToast("Model not installed yet. Use download first.");
-    setSttBusy(true);
-    const ok = await safeInvoke("set_stt_engine", { engine: next });
-    setSttBusy(false);
-    if (ok == null) return setToast("STT engine change failed");
-    setSttEngine(next);
-    setToast("STT engine updated");
-  };
-
-  const onDownloadModel = async (next: SttEngine) => {
-    const model = STT_MODEL_OPTIONS.find((item) => item.id === next);
-    if (!model?.command) return;
-    setDownloadingModel(next);
-    const ok = await safeInvoke(model.command);
-    setDownloadingModel(null);
-    if (ok == null) return setToast("Download failed");
-    const ready = await safeInvoke<boolean>("get_stt_model_installed", { engine: next });
-    if (ready === true) setInstalled((prev) => ({ ...prev, [next]: true }));
-    setToast("Model download complete");
-  };
-  const addDictionaryWord = () => {
-    const word = dictDraft.trim();
-    if (!word) return;
-    if (dictionary.includes(word)) return setToast("Word already exists");
-    setDictionary((prev) => [word, ...prev]);
-    setDictDraft("");
-  };
-  const runStylePreview = () => {
-    if (!selectedStyle) return;
-    setStylePreview(`[${selectedStyle.name}] ${styleSample}`);
+  const toggleCompletionSound = async () => {
+    const next = !completionSound;
+    setBusy(true);
+    try {
+      await invoke("set_completion_sound", { enabled: next });
+      setCompletionSound(next);
+      showOk(`Completion sound ${next ? "enabled" : "disabled"}.`);
+    } catch (e) {
+      showErr(`Failed to change completion sound: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
-    <div className="wv-settings wv-dashboard" data-appearance="light" data-variant="flowish">
-      <header className="wv-dashboard-topbar">
-        <div className="wv-dashboard-title">VoiceNote</div>
-        <div className="wv-dashboard-controls">
-          <button type="button" aria-label="Minimize" onClick={onMinimize}>−</button>
-          <button type="button" aria-label="Maximize" onClick={onMaximize}>□</button>
-          <button type="button" aria-label="Close" onClick={onClose}>×</button>
-        </div>
-      </header>
+    <div className="wv-pane">
+      <PaneHeader title="General" subtitle="System behavior and startup defaults." />
+      <SettingsSection title="Startup">
+        <SettingsRow label="Launch at login" last>
+          <ToggleSwitch label="Launch at login" on={launchAtLogin} onToggle={() => void toggleLaunchAtLogin()} disabled={busy} />
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title="Recording">
+        <SettingsRow label="Recording profile" hint="Controls how long silence is allowed before auto-stop.">
+          <select className="wv-select" value={profile} onChange={(e) => void changeProfile(e.target.value)} disabled={busy}>
+            <option value="balanced">Balanced (25 s)</option>
+            <option value="low_ram">Low RAM (5 s)</option>
+            <option value="fast_wake">Extended (60 s)</option>
+          </select>
+        </SettingsRow>
+        <SettingsRow label="Sound on completion" hint="Play a short chime when transcription finishes." last>
+          <ToggleSwitch label="Sound on completion" on={completionSound} onToggle={() => void toggleCompletionSound()} />
+        </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
 
-      <div className="wv-dashboard-body">
-        <aside className="wv-dashboard-nav">
-          <div className="wv-dashboard-brand">
-            <span className="wv-dashboard-brand-mark"><MicIcon /></span>
-            <div>
-              <p className="wv-dashboard-brand-title">Flow</p>
-              <p className="wv-dashboard-brand-pill">VoiceNote Pro</p>
+const MODEL_OPTIONS: { id: string; label: string; hint: string; badge?: string }[] = [
+  {
+    id: "parakeet",
+    label: "Parakeet TDT 0.6B v3",
+    hint: "Multilingual — 25 languages including English, French, German, Spanish.",
+  },
+  {
+    id: "canary_qwen_2_5b",
+    label: "Canary Qwen 2.5B",
+    hint: "High-accuracy English transcription.",
+    badge: "English only",
+  },
+];
+
+function ModelTab() {
+  const [activeModelId, setActiveModelId] = useState("parakeet");
+  const [status, setStatus] = useState<{ all_present: boolean } | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [provider, setProvider] = useState("cpu");
+  const [providerBusy, setProviderBusy] = useState(false);
+  const [providerStatus, setProviderStatus] = useState<ProviderRuntimeStatus | null>(null);
+  const unlistenRef = useRef<UnlistenFn | null>(null);
+  const { showErr, showInfo, showOk } = useToast();
+
+  const refreshModelStatus = async () => {
+    const v = await invoke<{ all_present: boolean }>("get_model_status");
+    setStatus(v);
+  };
+
+  useEffect(() => {
+    void invoke<string>("get_active_model_id").then(setActiveModelId).catch(console.error);
+    void refreshModelStatus().catch((e) => showErr(`Could not load model status: ${String(e)}`));
+    void invoke<string>("get_onnx_provider").then(setProvider).catch((e) => showErr(`Could not load provider: ${String(e)}`));
+    void invoke<ProviderRuntimeStatus>("get_provider_runtime_status")
+      .then(setProviderStatus)
+      .catch((e) => showErr(`Could not load provider runtime status: ${String(e)}`));
+    const unlistenProvider = listen<ProviderRuntimeStatus>("provider-runtime-status", (event) => {
+      setProviderStatus(event.payload);
+    });
+    return () => {
+      unlistenProvider.then((fn) => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => { unlistenRef.current?.(); };
+  }, []);
+
+  const onModelChange = async (modelId: string) => {
+    try {
+      await invoke("set_active_model_id", { modelId });
+      setActiveModelId(modelId);
+      setStatus(null);
+      await refreshModelStatus();
+    } catch (e) {
+      showErr(`Failed to switch model: ${String(e)}`);
+    }
+  };
+
+  async function startDownload() {
+    if (downloading) return;
+    unlistenRef.current?.();
+    setDownloading(true);
+    showInfo("Downloading model files...");
+    unlistenRef.current = await listen("model-download-complete", () => {
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+      setDownloading(false);
+      void refreshModelStatus().catch((e) => showErr(`Could not refresh model status: ${String(e)}`));
+      showOk("Model download complete.");
+    });
+    try {
+      await invoke("download_model");
+    } catch (e) {
+      setDownloading(false);
+      showErr(`Model download failed: ${String(e)}`);
+    }
+  }
+
+  const refreshAllModelState = async () => {
+    setRefreshing(true);
+    try {
+      await refreshModelStatus();
+      const currentProvider = await invoke<string>("get_onnx_provider");
+      setProvider(currentProvider);
+      const runtimeStatus = await invoke<ProviderRuntimeStatus>("get_provider_runtime_status");
+      setProviderStatus(runtimeStatus);
+      showOk("Model and provider status refreshed.");
+    } catch (e) {
+      showErr(`Failed to refresh model status: ${String(e)}`);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const onProviderChange = async (next: string) => {
+    setProviderBusy(true);
+    try {
+      await invoke("set_onnx_provider", { provider: next });
+      setProvider(next);
+      setProviderStatus({ requested: next, effective: "starting", message: "Reinitializing worker…" });
+      showOk("Provider updated. Worker is reinitializing.");
+    } catch (e) {
+      showErr(`Failed to set provider: ${String(e)}`);
+    } finally {
+      setProviderBusy(false);
+    }
+  };
+
+  const activeMatchesRequested =
+    providerStatus != null &&
+    providerStatus.effective === providerStatus.requested;
+
+  const selectedModelMeta = MODEL_OPTIONS.find((m) => m.id === activeModelId) ?? MODEL_OPTIONS[0];
+
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="Model" subtitle="Local transcription model running fully on-device." />
+      <SettingsSection title="Active model">
+        <SettingsRow label="Model" hint="Changes take effect on the next recording.">
+          <select
+            className="wv-select"
+            value={activeModelId}
+            onChange={(e) => void onModelChange(e.target.value)}
+          >
+            {MODEL_OPTIONS.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+        </SettingsRow>
+        <SettingsRow label="About" hint={selectedModelMeta.hint} last>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            {selectedModelMeta.badge && (
+              <StatusBadge tone="info">{selectedModelMeta.badge}</StatusBadge>
+            )}
+            {status?.all_present ? (
+              <StatusBadge tone="ok">Installed</StatusBadge>
+            ) : (
+              <Button onClick={() => void startDownload()} busy={downloading} busyLabel="Downloading...">
+                Download
+              </Button>
+            )}
+          </div>
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title="Inference provider">
+        <SettingsRow label="Backend" hint="Restart app after changing.">
+          <select className="wv-select" value={provider} onChange={(e) => void onProviderChange(e.target.value)} disabled={providerBusy}>
+            <option value="cpu">CPU (always works)</option>
+            <option value="cuda">CUDA (NVIDIA GPU)</option>
+            <option value="directml">DirectML (Windows GPU)</option>
+          </select>
+        </SettingsRow>
+        <SettingsRow label="Requested">
+          <span className="wv-note">{providerStatus?.requested ?? "—"}</span>
+        </SettingsRow>
+        <SettingsRow label="Active">
+          {providerStatus ? (
+            <StatusBadge tone={activeMatchesRequested ? "ok" : "warn"}>
+              {providerStatus.effective}
+            </StatusBadge>
+          ) : (
+            <StatusBadge tone="info">Unknown</StatusBadge>
+          )}
+        </SettingsRow>
+        <SettingsRow label="Refresh status" last>
+          <Button
+            variant="ghost"
+            onClick={() => void refreshAllModelState()}
+            disabled={providerBusy || downloading}
+            busy={refreshing}
+            busyLabel="Refreshing..."
+          >
+            Refresh Status
+          </Button>
+        </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
+
+function ShortcutTab() {
+  const [recordingShortcut, setRecordingShortcut] = useState(DEFAULT_SHORTCUT);
+  const [pendingShortcut, setPendingShortcut] = useState<string | null>(null);
+  const [capturedShortcut, setCapturedShortcut] = useState<string | null>(null);
+  const [captureMode, setCaptureMode] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [shortcutStatus, setShortcutStatus] = useState<ShortcutStatus | null>(null);
+  const { showErr, showInfo, showOk } = useToast();
+
+  const refresh = async () => {
+    const [shortcut, status] = await Promise.all([
+      invoke<string>("get_shortcut"),
+      invoke<ShortcutStatus>("get_shortcut_status"),
+    ]);
+    setRecordingShortcut(shortcut);
+    setShortcutStatus(status);
+  };
+
+  useEffect(() => {
+    void refresh().catch((e) => showErr(`Could not load shortcut settings: ${String(e)}`));
+  }, []);
+
+  const applyShortcut = async (candidate: string) => {
+    setSaveBusy(true);
+    try {
+      await invoke("set_shortcut", { shortcut: candidate });
+      setRecordingShortcut(candidate);
+      setPendingShortcut(null);
+      setCapturedShortcut(candidate);
+      showOk(`Shortcut saved: ${candidate}`);
+      try { await refresh(); } catch { /* status refresh is best-effort */ }
+    } catch (e) {
+      showErr(`Failed to save shortcut: ${String(e)}`);
+    } finally {
+      setSaveBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!captureMode) return;
+    let fired = false;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (fired) return;
+      fired = true;
+      e.preventDefault();
+      const normalized = normalizeShortcutFromEvent(e);
+      if (!normalized) {
+        showErr("Could not capture this shortcut. Try a different key combination.");
+        return;
+      }
+      setPendingShortcut(normalized);
+      setCapturedShortcut(normalized);
+      setCaptureMode(false);
+      showInfo(`Captured: ${normalized}. Saving...`);
+      void applyShortcut(normalized);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [captureMode]);
+
+  const resetDefault = async () => {
+    setSaveBusy(true);
+    try {
+      await invoke("set_shortcut", { shortcut: DEFAULT_SHORTCUT });
+      setRecordingShortcut(DEFAULT_SHORTCUT);
+      setPendingShortcut(null);
+      setCapturedShortcut(DEFAULT_SHORTCUT);
+      showOk(`Shortcut reset to ${DEFAULT_SHORTCUT}.`);
+      try { await refresh(); } catch { /* status refresh is best-effort */ }
+    } catch (e) {
+      showErr(`Failed to reset shortcut: ${String(e)}`);
+    } finally {
+      setSaveBusy(false);
+    }
+  };
+
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="Shortcut" subtitle="Global shortcut for recording." />
+      <SettingsSection>
+        <SettingsRow label="Start / Stop recording" hint="Capture a key combo and save it as your global shortcut.">
+          <div className="wv-inline wv-inline-stack">
+            {captureMode ? (
+              <div className="wv-capture-indicator">
+                <span className="wv-capture-ring" />
+                Press any key…
+              </div>
+            ) : (
+              <span className="wv-kbd">{pendingShortcut ?? capturedShortcut ?? recordingShortcut}</span>
+            )}
+            <div className="wv-inline">
+              {!captureMode && (
+                <Button onClick={() => setCaptureMode(true)} disabled={saveBusy}>
+                  Change Shortcut
+                </Button>
+              )}
+              {captureMode && (
+                <Button variant="ghost" onClick={() => { setCaptureMode(false); setPendingShortcut(null); }}>
+                  Cancel
+                </Button>
+              )}
+              {!captureMode && (
+                <Button variant="ghost" onClick={() => void resetDefault()} disabled={saveBusy}>
+                  Reset Default
+                </Button>
+              )}
             </div>
           </div>
-          <nav className="wv-dashboard-menu">
-            {NAV_ITEMS.map((item) => (
-              <button key={item.id} type="button" className="wv-dashboard-menu-item" data-active={activePage === item.id ? "1" : "0"} onClick={() => setActivePage(item.id)}>
-                <span className="wv-dashboard-menu-icon">{item.icon}</span>
-                <span>{item.label}</span>
+        </SettingsRow>
+        <SettingsRow label="Registration status" last>
+          {shortcutStatus ? (
+            <StatusBadge tone={shortcutStatus.registered ? "ok" : "err"}>
+              {shortcutStatus.registered ? "Registered" : "Not registered"}
+            </StatusBadge>
+          ) : (
+            <StatusBadge tone="info">Unknown</StatusBadge>
+          )}
+        </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
+
+function MicrophoneTab({ accent, onAccentChange }: { accent: string; onAccentChange: (value: string) => void }) {
+  const [devices, setDevices] = useState<string[]>([]);
+  const [selectedDevice, setSelectedDevice] = useState<string>("System Default");
+  const [debugMicLevel, setDebugMicLevel] = useState(false);
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  const [meterBusy, setMeterBusy] = useState(false);
+  const [testBusy, setTestBusy] = useState(false);
+  const colorDebounceRef = useRef<number | null>(null);
+  const { showErr, showOk } = useToast();
+
+  useEffect(() => {
+    return () => {
+      if (colorDebounceRef.current !== null) {
+        window.clearTimeout(colorDebounceRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    void invoke<{ selected_device?: string; devices: string[] }>("get_audio_input_info")
+      .then((info) => {
+        setDevices(info.devices || []);
+        setSelectedDevice(info.selected_device || "System Default");
+      })
+      .catch((e) => showErr(`Could not load microphone list: ${String(e)}`));
+
+    void invoke<boolean>("get_debug_mic_level")
+      .then(setDebugMicLevel)
+      .catch((e) => showErr(`Could not load level meter setting: ${String(e)}`));
+  }, []);
+
+  const changeDevice = async (v: string) => {
+    setDeviceBusy(true);
+    try {
+      await invoke("set_audio_input_device", { deviceName: v === "System Default" ? null : v });
+      setSelectedDevice(v);
+      showOk("Microphone updated.");
+    } catch (e) {
+      showErr(`Failed to set microphone: ${String(e)}`);
+    } finally {
+      setDeviceBusy(false);
+    }
+  };
+
+  const toggleLevelMeter = async () => {
+    const next = !debugMicLevel;
+    setMeterBusy(true);
+    try {
+      await invoke("set_debug_mic_level", { enabled: next });
+      setDebugMicLevel(next);
+      showOk(`Level meter ${next ? "enabled" : "disabled"}.`);
+    } catch (e) {
+      showErr(`Failed to change level meter: ${String(e)}`);
+    } finally {
+      setMeterBusy(false);
+    }
+  };
+
+  const testMicrophone = async () => {
+    setTestBusy(true);
+    try {
+      const result = await invoke<{ ok: boolean; message: string }>("test_microphone");
+      if (result.ok) showOk(result.message);
+      else showErr(result.message);
+    } catch (e) {
+      showErr(`Microphone test failed: ${String(e)}`);
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="Microphone" subtitle="Input behavior and live recording diagnostics." />
+      <SettingsSection title="Input device">
+        <SettingsRow label="Microphone">
+          <select className="wv-select" value={selectedDevice} onChange={(e) => void changeDevice(e.target.value)} disabled={deviceBusy}>
+            <option>System Default</option>
+            {devices.map((d) => <option key={d}>{d}</option>)}
+          </select>
+        </SettingsRow>
+        <SettingsRow label="Waveform accent">
+          <input
+            type="color"
+            className="wv-color"
+            value={accent}
+            onChange={(e) => {
+              const c = e.target.value;
+              onAccentChange(c);
+              if (colorDebounceRef.current !== null) window.clearTimeout(colorDebounceRef.current);
+              colorDebounceRef.current = window.setTimeout(() => {
+                void invoke("set_waveform_color", { color: c })
+                  .then(() => showOk("Waveform accent updated."))
+                  .catch((err) => showErr(`Failed to update waveform accent: ${String(err)}`));
+              }, 200);
+            }}
+          />
+        </SettingsRow>
+        <SettingsRow label="Show level meter" hint="Display live microphone level while recording." last>
+          <ToggleSwitch
+            label="Show level meter"
+            on={debugMicLevel}
+            onToggle={() => void toggleLevelMeter()}
+            disabled={meterBusy}
+          />
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title="Test">
+        <SettingsRow label="Microphone test" hint="Checks whether VoiceNote can see an input device." last>
+          <Button onClick={() => void testMicrophone()} busy={testBusy} busyLabel="Testing...">
+            Test Microphone
+          </Button>
+        </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
+
+function AppearanceTab({ accent, onAccentChange }: { accent: string; onAccentChange: (value: string) => void }) {
+  const colors = ["#0A84FF", "#30D158", "#BF5AF2", "#FF9F0A", "#FF375F"];
+  const [busy, setBusy] = useState(false);
+  const [colorBusy, setColorBusy] = useState(false);
+  const { showErr, showOk } = useToast();
+
+  const resetVoicebarPosition = async () => {
+    setBusy(true);
+    try {
+      await invoke("reset_voicebar_position");
+      showOk("Voicebar position reset.");
+    } catch (e) {
+      showErr(`Failed to reset voicebar position: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="Appearance" subtitle="Theme accents and display preferences." />
+      <SettingsSection title="Accent color">
+        <SettingsRow label="Preset colors" last>
+          <div className="wv-swatches">
+            {colors.map((c) => (
+              <button
+                type="button"
+                key={c}
+                className="wv-swatch"
+                data-active={accent === c ? "1" : "0"}
+                style={{ background: c }}
+                aria-label={`Set accent color ${c}`}
+                onClick={() => {
+                  if (colorBusy) return;
+                  setColorBusy(true);
+                  onAccentChange(c);
+                  void invoke("set_waveform_color", { color: c })
+                    .then(() => showOk("Accent color updated."))
+                    .catch((err) => showErr(`Failed to update accent color: ${String(err)}`))
+                    .finally(() => setColorBusy(false));
+                }}
+              />
+            ))}
+          </div>
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title="Voicebar">
+        <SettingsRow label="Position" hint="Move the floating voicebar back to the center of the screen." last>
+          <Button variant="ghost" busy={busy} busyLabel="Resetting…" onClick={() => void resetVoicebarPosition()}>
+            Reset Position
+          </Button>
+        </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
+
+
+function DiagnosticsTab() {
+  const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [running, setRunning] = useState(false);
+  const { showErr, showInfo } = useToast();
+
+  const runHealthCheck = async () => {
+    setRunning(true);
+    try {
+      const result = await invoke<HealthStatus>("run_health_check");
+      setHealth(result);
+      showInfo("Health check complete.");
+    } catch (e) {
+      setHealth(null);
+      showErr(`Health check failed: ${String(e)}`);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="Diagnostics" subtitle="Check local runtime dependencies used for transcription." />
+      <SettingsSection title="Health check">
+        <SettingsRow label="Worker runtime" hint={health?.worker_exists === false ? "Worker executable is missing. Reinstall the app or restore the worker file." : "Required for local transcription."}>
+          {health ? <StatusBadge tone={health.worker_exists ? "ok" : "err"}>{health.worker_exists ? "Ready" : "Missing"}</StatusBadge> : <StatusBadge tone="info">Not checked</StatusBadge>}
+        </SettingsRow>
+        <SettingsRow label="Model files" hint={health?.model_exists === false ? "Model files are missing. Open Model and download the local model." : "Required before transcription can run."}>
+          {health ? <StatusBadge tone={health.model_exists ? "ok" : "err"}>{health.model_exists ? "Ready" : "Missing"}</StatusBadge> : <StatusBadge tone="info">Not checked</StatusBadge>}
+        </SettingsRow>
+        <SettingsRow label="Run health check" last>
+          <Button onClick={() => void runHealthCheck()} busy={running} busyLabel="Running...">
+            Run
+          </Button>
+        </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
+
+function AboutTab({ onNavigate }: { onNavigate: (page: Page) => void }) {
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="About" subtitle="Version and application information." />
+      <SettingsSection title="App info">
+        <SettingsRow label="Application">
+          <span className="wv-note">VoiceNote</span>
+        </SettingsRow>
+        <SettingsRow label="Version">
+          <span className="wv-note">0.1.0</span>
+        </SettingsRow>
+        <SettingsRow label="Runtime" last>
+          <span className="wv-note">Tauri 2 · Parakeet TDT</span>
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title="Troubleshooting">
+        <SettingsRow label="Diagnostics" hint="View worker and model health checks." last>
+          <Button onClick={() => onNavigate("diagnostics")}>Open Diagnostics</Button>
+        </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
+
+const AI_MODES: Array<{ value: AiDefaultMode; label: string; hint: string }> = [
+  { value: "raw",           label: "Raw",             hint: "Paste transcript as-is" },
+  { value: "clean",         label: "Clean",           hint: "Fix grammar & punctuation" },
+  { value: "translate",     label: "Translate",       hint: "Translate to English" },
+  { value: "clean_translate", label: "Clean + Translate", hint: "Fix grammar, then translate" },
+];
+
+function AiTab() {
+  const [settings, setSettings] = useState<AiSettings | null>(null);
+  const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  // capturingFor holds the profile_id that is waiting for a hotkey press
+  const [capturingFor, setCapturingFor] = useState<string | null>(null);
+  const { showErr, showOk, showInfo } = useToast();
+
+  const load = async () => {
+    const [s, p] = await Promise.all([
+      invoke<AiSettings>("get_ai_settings"),
+      invoke<ProfileInfo[]>("get_profiles"),
+    ]);
+    setSettings(s);
+    setProfiles(p);
+  };
+
+  useEffect(() => {
+    void load().catch((e) => showErr(`Could not load AI settings: ${String(e)}`));
+  }, []);
+
+  // Hotkey capture listener — mirrors ShortcutTab's captureMode pattern
+  useEffect(() => {
+    if (!capturingFor) return;
+    let fired = false;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (fired) return;
+      fired = true;
+      e.preventDefault();
+      const normalized = normalizeShortcutFromEvent(e);
+      if (!normalized) {
+        showErr("Could not capture this shortcut. Try a different key combination.");
+        setCapturingFor(null);
+        return;
+      }
+      const profileId = capturingFor;
+      setCapturingFor(null);
+      showInfo(`Captured: ${normalized}. Saving…`);
+      void (async () => {
+        setBusy(true);
+        try {
+          await invoke("set_profile_hotkey", { profileId, hotkey: normalized });
+          setProfiles((ps) =>
+            ps.map((p) => (p.id === profileId ? { ...p, hotkey: normalized } : p))
+          );
+          showOk(`Hotkey ${normalized} assigned.`);
+        } catch (ex) {
+          showErr(String(ex));
+        } finally {
+          setBusy(false);
+        }
+      })();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [capturingFor]);
+
+  const saveDefaultMode = async (mode: AiDefaultMode) => {
+    setBusy(true);
+    try {
+      await invoke("set_ai_default_mode", { mode });
+      setSettings((s) => (s ? { ...s, default_mode: mode } : s));
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveBackend = async (backend: AiSettings["backend"]) => {
+    setBusy(true);
+    try {
+      await invoke("set_ai_backend", { backend });
+      setSettings((s) => (s ? { ...s, backend } : s));
+      showOk("Backend updated.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveApiKey = async () => {
+    if (!apiKeyInput) return;
+    setBusy(true);
+    try {
+      await invoke("set_ai_api_key", { key: apiKeyInput });
+      setApiKeyInput("");
+      setSettings((s) => (s ? { ...s, api_key_masked: "••••••••••••••••" } : s));
+      showOk("API key saved.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveModel = async (model: string) => {
+    if (!model.trim()) return;
+    setBusy(true);
+    try {
+      await invoke("set_ai_model", { model: model.trim() });
+      setSettings((s) => (s ? { ...s, model: model.trim() } : s));
+      showOk("Model updated.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveOllamaUrl = async (url: string) => {
+    if (!url.trim()) return;
+    setBusy(true);
+    try {
+      await invoke("set_ai_ollama_url", { url: url.trim() });
+      setSettings((s) => (s ? { ...s, ollama_url: url.trim() } : s));
+      showOk("Ollama URL saved.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearHotkey = async (profileId: string) => {
+    setBusy(true);
+    try {
+      await invoke("set_profile_hotkey", { profileId, hotkey: null });
+      setProfiles((ps) => ps.map((p) => (p.id === profileId ? { ...p, hotkey: null } : p)));
+      showOk("Hotkey cleared.");
+    } catch (e) {
+      showErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!settings) {
+    return (
+      <div className="wv-pane">
+        <PaneHeader title="AI" subtitle="Post-processing profiles." />
+        <div className="wv-note" style={{ padding: "16px" }}>Loading…</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="AI ✦" subtitle="Reshape transcripts automatically after every recording." />
+
+      <SettingsSection title="Default processing">
+        <SettingsRow label="Output mode" hint="Applied to every recording. Profile hotkeys override this." last>
+          <div className="wv-seg">
+            {AI_MODES.map((m) => (
+              <button
+                key={m.value}
+                type="button"
+                className="wv-seg-btn"
+                data-active={settings.default_mode === m.value ? "1" : "0"}
+                disabled={busy}
+                title={m.hint}
+                onClick={() => void saveDefaultMode(m.value)}
+              >
+                {m.label}
               </button>
             ))}
-          </nav>
-        </aside>
-
-        <main className="wv-dashboard-main">
-          {dashboard.notices.map((notice) => <div key={notice} className="wv-notice" data-tone="warn">{notice}</div>)}
-
-          {activePage === "home" && (
-            <section className="wv-dashboard-feed">
-              <h3>TODAY</h3>
-              <div className="wv-insights-wrap">
-                <div className="wv-segmented">
-                  <button type="button" data-active={feedFilter === "all" ? "1" : "0"} onClick={() => setFeedFilter("all")}>All</button>
-                  <button type="button" data-active={feedFilter === "favorites" ? "1" : "0"} onClick={() => setFeedFilter("favorites")}>Favorites</button>
-                </div>
-                {visibleActivity.length === 0 ? (
-                  <div className="wv-dashboard-empty">No transcripts yet. Start recording and entries will appear here.</div>
-                ) : (
-                  <ul>
-                    {visibleActivity.map((row, idx) => (
-                      <li key={`${row.timestamp}-${idx}`}>
-                        <span>{row.timestamp}</span>
-                        <div className="wv-home-row">
-                          <button type="button" className="wv-dashboard-transcript" onClick={() => navigator.clipboard?.writeText(row.text)}>{row.text}</button>
-                          <button type="button" className="wv-home-fav" data-active={favorites.includes(row.text) ? "1" : "0"} onClick={() => setFavorites((prev) => prev.includes(row.text) ? prev.filter((t) => t !== row.text) : [row.text, ...prev])}>★</button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </section>
-          )}
-
-          {activePage === "insights" && (
-            <section className="wv-dashboard-feed">
-              <h3>INSIGHTS</h3>
-              <div className="wv-insights-wrap">
-                <div className="wv-segmented">
-                  <button type="button" data-active={scope === "today" ? "1" : "0"} onClick={() => setScope("today")}>Today</button>
-                  <button type="button" data-active={scope === "week" ? "1" : "0"} onClick={() => setScope("week")}>This Week</button>
-                </div>
-                <div className="wv-insights-grid">
-                  <div className="wv-dashboard-card"><small>Words</small><strong>{dashboard.metrics.totalWords}</strong></div>
-                  <div className="wv-dashboard-card"><small>Avg WPM</small><strong>{dashboard.metrics.wpm}</strong></div>
-                  <div className="wv-dashboard-card"><small>Sessions</small><strong>{dashboard.activity.length}</strong></div>
-                  <div className="wv-dashboard-card"><small>Streak</small><strong>{dashboard.metrics.dayStreak}</strong></div>
-                </div>
-              </div>
-            </section>
-          )}
-
-          {activePage === "ai" && (
-            <section className="wv-dashboard-feed">
-              <h3>AI</h3>
-              <div className="wv-ai-grid">
-                <div className="wv-ai-card">
-                  <div className="wv-ai-provider-tabs">
-                    {(["openai", "anthropic", "gemini", "ollama"] as const).map((provider) => (
-                      <button key={provider} type="button" data-active={aiProvider === provider ? "1" : "0"} onClick={() => setAiProvider(provider)}>{provider === "anthropic" ? "Claude" : provider[0].toUpperCase() + provider.slice(1)}</button>
-                    ))}
-                  </div>
-                  <div className="wv-ai-controls">
-                    <label className="wv-ai-label">
-                      <span>Model</span>
-                      <select className="wv-input-light" value={aiModel} onChange={(e) => setAiModel(e.target.value)}>
-                        <option value="gpt-4o-mini">gpt-4o-mini</option>
-                        <option value="gpt-5-mini">gpt-5-mini</option>
-                        <option value="claude-3-5-sonnet-latest">claude-3.5-sonnet</option>
-                        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                      </select>
-                    </label>
-                    <label className="wv-ai-label"><span>OpenAI API key</span><div className="wv-key-row"><input className="wv-input-light" type={showKey.openai ? "text" : "password"} value={openAiKey} onChange={(e) => setOpenAiKey(e.target.value)} /><button type="button" className="wv-inline-btn" onClick={() => setShowKey((prev) => ({ ...prev, openai: !prev.openai }))}>{showKey.openai ? "Hide" : "Show"}</button></div></label>
-                    <label className="wv-ai-label"><span>Claude API key</span><div className="wv-key-row"><input className="wv-input-light" type={showKey.claude ? "text" : "password"} value={claudeKey} onChange={(e) => setClaudeKey(e.target.value)} /><button type="button" className="wv-inline-btn" onClick={() => setShowKey((prev) => ({ ...prev, claude: !prev.claude }))}>{showKey.claude ? "Hide" : "Show"}</button></div></label>
-                    <label className="wv-ai-label"><span>Gemini API key</span><div className="wv-key-row"><input className="wv-input-light" type={showKey.gemini ? "text" : "password"} value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} /><button type="button" className="wv-inline-btn" onClick={() => setShowKey((prev) => ({ ...prev, gemini: !prev.gemini }))}>{showKey.gemini ? "Hide" : "Show"}</button></div></label>
-                    <button type="button" className="wv-inline-btn wv-ai-save" onClick={() => void saveProvider()}>Save AI Settings</button>
-                  </div>
-                </div>
-
-                <div className="wv-ai-card">
-                  <div className="wv-ai-section-head">
-                    <strong>Preset Shortcuts</strong>
-                    <small>Choose only hotkeys. Preset behavior is fixed.</small>
-                  </div>
-                  <ul className="wv-preset-list">
-                    {presets.map((preset) => (
-                      <li key={preset.id}>
-                        <div>
-                          <p>{preset.name}</p>
-                          <small>{preset.description}</small>
-                        </div>
-                        <input className="wv-input-light" placeholder="Press shortcut" value={preset.hotkey} onChange={(e) => setPresets((prev) => prev.map((p) => (p.id === preset.id ? { ...p, hotkey: e.target.value } : p)))} onBlur={(e) => void setPresetHotkey(preset.id, e.target.value)} />
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            </section>
-          )}
-
-          {activePage === "dictionary" && (
-            <section className="wv-dashboard-feed">
-              <h3>DICTIONARY</h3>
-              <div className="wv-form-grid">
-                <div className="wv-inline-form">
-                  <input className="wv-input-light" placeholder="Add word" value={dictDraft} onChange={(e) => setDictDraft(e.target.value)} />
-                  <button type="button" className="wv-inline-btn" onClick={addDictionaryWord}>Add</button>
-                </div>
-                <input className="wv-input-light" placeholder="Search words" value={dictSearch} onChange={(e) => setDictSearch(e.target.value)} />
-                {filteredDictionary.length === 0 ? (
-                  <div className="wv-dashboard-empty">No words yet. Add your first dictionary word.</div>
-                ) : (
-                  <ul className="wv-simple-list">
-                    {filteredDictionary.map((word) => (
-                      <li key={word}>
-                        <input className="wv-input-light" defaultValue={word} onBlur={(e) => setDictionary((prev) => prev.map((w) => (w === word ? (e.target.value.trim() || w) : w)))} />
-                        <button type="button" className="wv-inline-btn danger" onClick={() => setDictionary((prev) => prev.filter((w) => w !== word))}>Delete</button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </section>
-          )}
-
-          {activePage === "style" && (
-            <section className="wv-dashboard-feed">
-              <h3>STYLE</h3>
-              <div className="wv-style-layout">
-                <div className="wv-style-list">
-                  {stylePresets.map((preset) => (
-                    <button key={preset.id} type="button" className="wv-style-item" data-active={selectedStyleId === preset.id ? "1" : "0"} onClick={() => setSelectedStyleId(preset.id)}>
-                      {preset.name}
-                    </button>
-                  ))}
-                </div>
-                <div className="wv-style-editor">
-                  {selectedStyle && (
-                    <>
-                      <input className="wv-input-light" value={selectedStyle.name} disabled />
-                      <textarea className="wv-input-light wv-textarea" value={selectedStyle.instruction} onChange={(e) => setStylePresets((prev) => prev.map((p) => (p.id === selectedStyle.id && !p.builtIn ? { ...p, instruction: e.target.value } : p)))} />
-                      <h4>Preview</h4>
-                      <textarea className="wv-input-light wv-textarea" value={styleSample} onChange={(e) => setStyleSample(e.target.value)} />
-                      <button type="button" className="wv-inline-btn" onClick={runStylePreview}>Run preview</button>
-                      <div className="wv-dashboard-empty">{stylePreview || "Preview output appears here."}</div>
-                    </>
-                  )}
-                </div>
-              </div>
-            </section>
-          )}
-
-          {activePage === "transforms" && (
-            <section className="wv-dashboard-feed">
-              <h3>TRANSFORMS</h3>
-              <div className="wv-dashboard-empty">Transforms is deferred for now.</div>
-            </section>
-          )}
-
-          {activePage === "settings" && (
-            <section className="wv-dashboard-feed">
-              <h3>SETTINGS</h3>
-              <div className="wv-form-grid">
-                <div style={{ border: "1px solid #d5d7dc", borderRadius: 10, overflow: "hidden", background: "#f4f5f6" }}>
-                  {STT_MODEL_OPTIONS.map((item) => {
-                    const isActive = item.id === sttEngine;
-                    const isDownloading = downloadingModel === item.id;
-                    return (
-                      <div key={item.id} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", alignItems: "center", gap: 8, padding: "8px 10px", borderTop: "1px solid #e0e2e6", background: isActive ? "#dde9fc" : "transparent" }}>
-                        <button type="button" onClick={() => void onDownloadModel(item.id)} disabled={sttBusy || isDownloading} style={{ width: 22, height: 22, borderRadius: 11, border: "1px solid #7d8796", background: "#fff", color: "#1f2937", fontSize: 11 }}>↓</button>
-                        <button type="button" onClick={() => void onSttEngineChange(item.id)} disabled={sttBusy} style={{ border: "none", background: "transparent", textAlign: "left", color: "#1f2937" }}>
-                          <div style={{ fontWeight: 650 }}>{item.title}</div>
-                          <div style={{ fontSize: 12, color: "#4b5563" }}>{item.subtitle}</div>
-                        </button>
-                        <small style={{ color: "#374151" }}>{item.size}</small>
-                        <small style={{ color: "#374151" }}>{isDownloading ? "..." : installed[item.id] ? "Ready" : "Missing"}</small>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </section>
-          )}
-        </main>
-
-        <aside className="wv-dashboard-rail">
-          <div className="wv-dashboard-card">
-            <p><strong>{dashboard.metrics.totalWords || "--"}</strong> total words</p>
-            <p><strong>{dashboard.metrics.wpm || "--"}</strong> avg wpm</p>
-            <p><strong>{dashboard.metrics.dayStreak || "--"}</strong> day streak</p>
           </div>
-        </aside>
-      </div>
+        </SettingsRow>
+      </SettingsSection>
 
-      {toast && <div className="wv-dashboard-toast">{toast}</div>}
+      <SettingsSection title="AI Backend">
+        <SettingsRow label="Provider">
+          <select
+            className="wv-select"
+            value={settings.backend}
+            disabled={busy}
+            onChange={(e) => void saveBackend(e.target.value as AiSettings["backend"])}
+          >
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="ollama">Local (Ollama)</option>
+          </select>
+        </SettingsRow>
+
+        {settings.backend !== "ollama" && (
+          <>
+            <SettingsRow
+              label="API Key"
+              hint={
+                settings.backend === "gemini"
+                  ? "Google AI Studio key — stored encrypted, never written to disk."
+                  : settings.backend === "anthropic"
+                  ? "Anthropic key — stored encrypted, never written to disk."
+                  : "OpenAI key — stored encrypted, never written to disk."
+              }
+            >
+              <input
+                className="wv-input"
+                type="password"
+                placeholder={
+                  settings.api_key_masked
+                    ? "••••••••••••••••"
+                    : settings.backend === "gemini"
+                    ? "AIzaSy…"
+                    : settings.backend === "anthropic"
+                    ? "sk-ant-…"
+                    : "sk-…"
+                }
+                value={apiKeyInput}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                disabled={busy}
+                style={{ width: "160px" }}
+              />
+              <Button onClick={() => void saveApiKey()} disabled={busy || !apiKeyInput}>
+                Save
+              </Button>
+            </SettingsRow>
+            <SettingsRow
+              label="Model"
+              hint={
+                settings.backend === "gemini"
+                  ? 'e.g. "gemini-2.5-flash"'
+                  : settings.backend === "anthropic"
+                  ? 'e.g. "claude-3-haiku-20240307"'
+                  : 'e.g. "gpt-4o-mini"'
+              }
+              last
+            >
+              <input
+                className="wv-input"
+                type="text"
+                defaultValue={settings.model}
+                key={settings.backend}
+                disabled={busy}
+                onBlur={(e) => void saveModel(e.target.value)}
+                style={{ width: "200px" }}
+              />
+            </SettingsRow>
+          </>
+        )}
+
+        {settings.backend === "ollama" && (
+          <>
+            <SettingsRow label="Ollama URL">
+              <input
+                className="wv-input"
+                type="text"
+                defaultValue={settings.ollama_url}
+                disabled={busy}
+                onBlur={(e) => void saveOllamaUrl(e.target.value)}
+                style={{ width: "200px" }}
+              />
+            </SettingsRow>
+            <SettingsRow label="Model" hint='e.g. "llama3"' last>
+              <input
+                className="wv-input"
+                type="text"
+                defaultValue={settings.model}
+                disabled={busy}
+                onBlur={(e) => void saveModel(e.target.value)}
+                style={{ width: "200px" }}
+              />
+            </SettingsRow>
+          </>
+        )}
+      </SettingsSection>
+
+      <SettingsSection title="Profiles — assign a hotkey to activate during recording">
+        {profiles.map((profile, idx) => (
+          <SettingsRow
+            key={profile.id}
+            label={profile.name}
+            last={idx === profiles.length - 1}
+          >
+            {capturingFor === profile.id ? (
+              <div className="wv-capture-indicator">
+                <span className="wv-capture-ring" />
+                Press any key…
+              </div>
+            ) : profile.hotkey ? (
+              <div className="wv-inline">
+                <span className="wv-kbd">{profile.hotkey}</span>
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => void clearHotkey(profile.id)}
+                >
+                  Clear
+                </Button>
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                disabled={busy || capturingFor !== null}
+                onClick={() => setCapturingFor(profile.id)}
+              >
+                + Assign hotkey
+              </Button>
+            )}
+            {capturingFor === profile.id && (
+              <Button
+                variant="ghost"
+                onClick={() => setCapturingFor(null)}
+              >
+                Cancel
+              </Button>
+            )}
+          </SettingsRow>
+        ))}
+      </SettingsSection>
     </div>
   );
 }
