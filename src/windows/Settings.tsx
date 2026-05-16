@@ -65,7 +65,7 @@ export default function Settings() {
   }, []);
 
   return (
-    <div className="wv-settings" data-appearance="dark" data-variant="classic">
+    <div className="wv-settings" data-appearance="light" data-variant="warm">
       <div className="wv-chrome">
         <div className="wv-traffic">
           <button aria-label="Close settings" onClick={closeSettings} style={{ background: "#FF5F57" }} />
@@ -269,7 +269,22 @@ function GeneralTab() {
   );
 }
 
+const MODEL_OPTIONS: { id: string; label: string; hint: string; badge?: string }[] = [
+  {
+    id: "parakeet",
+    label: "Parakeet TDT 0.6B v3",
+    hint: "Multilingual — 25 languages including English, French, German, Spanish.",
+  },
+  {
+    id: "canary_qwen_2_5b",
+    label: "Canary Qwen 2.5B",
+    hint: "High-accuracy English transcription.",
+    badge: "English only",
+  },
+];
+
 function ModelTab() {
+  const [activeModelId, setActiveModelId] = useState("parakeet");
   const [status, setStatus] = useState<{ all_present: boolean } | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -285,6 +300,7 @@ function ModelTab() {
   };
 
   useEffect(() => {
+    void invoke<string>("get_active_model_id").then(setActiveModelId).catch(console.error);
     void refreshModelStatus().catch((e) => showErr(`Could not load model status: ${String(e)}`));
     void invoke<string>("get_onnx_provider").then(setProvider).catch((e) => showErr(`Could not load provider: ${String(e)}`));
     void invoke<ProviderRuntimeStatus>("get_provider_runtime_status")
@@ -301,6 +317,17 @@ function ModelTab() {
   useEffect(() => {
     return () => { unlistenRef.current?.(); };
   }, []);
+
+  const onModelChange = async (modelId: string) => {
+    try {
+      await invoke("set_active_model_id", { modelId });
+      setActiveModelId(modelId);
+      setStatus(null);
+      await refreshModelStatus();
+    } catch (e) {
+      showErr(`Failed to switch model: ${String(e)}`);
+    }
+  };
 
   async function startDownload() {
     if (downloading) return;
@@ -356,18 +383,36 @@ function ModelTab() {
     providerStatus != null &&
     providerStatus.effective === providerStatus.requested;
 
+  const selectedModelMeta = MODEL_OPTIONS.find((m) => m.id === activeModelId) ?? MODEL_OPTIONS[0];
+
   return (
     <div className="wv-pane">
       <PaneHeader title="Model" subtitle="Local transcription model running fully on-device." />
-      <SettingsSection title="Local model">
-        <SettingsRow label="Parakeet TDT 0.6B v3" hint="Required for on-device transcription." last>
-          {status?.all_present ? (
-            <StatusBadge tone="ok">Installed</StatusBadge>
-          ) : (
-            <Button onClick={() => void startDownload()} busy={downloading} busyLabel="Downloading...">
-              Download
-            </Button>
-          )}
+      <SettingsSection title="Active model">
+        <SettingsRow label="Model" hint="Changes take effect on the next recording.">
+          <select
+            className="wv-select"
+            value={activeModelId}
+            onChange={(e) => void onModelChange(e.target.value)}
+          >
+            {MODEL_OPTIONS.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+        </SettingsRow>
+        <SettingsRow label="About" hint={selectedModelMeta.hint} last>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            {selectedModelMeta.badge && (
+              <StatusBadge tone="info">{selectedModelMeta.badge}</StatusBadge>
+            )}
+            {status?.all_present ? (
+              <StatusBadge tone="ok">Installed</StatusBadge>
+            ) : (
+              <Button onClick={() => void startDownload()} busy={downloading} busyLabel="Downloading...">
+                Download
+              </Button>
+            )}
+          </div>
         </SettingsRow>
       </SettingsSection>
       <SettingsSection title="Inference provider">
@@ -956,6 +1001,7 @@ function AiTab() {
             onChange={(e) => void saveBackend(e.target.value as AiSettings["backend"])}
           >
             <option value="openai">OpenAI</option>
+            <option value="gemini">Google Gemini</option>
             <option value="anthropic">Anthropic</option>
             <option value="ollama">Local (Ollama)</option>
           </select>
@@ -963,11 +1009,28 @@ function AiTab() {
 
         {settings.backend !== "ollama" && (
           <>
-            <SettingsRow label="API Key" hint="Stored securely in the OS keyring — never written to disk.">
+            <SettingsRow
+              label="API Key"
+              hint={
+                settings.backend === "gemini"
+                  ? "Google AI Studio key — stored encrypted, never written to disk."
+                  : settings.backend === "anthropic"
+                  ? "Anthropic key — stored encrypted, never written to disk."
+                  : "OpenAI key — stored encrypted, never written to disk."
+              }
+            >
               <input
                 className="wv-input"
                 type="password"
-                placeholder={settings.api_key_masked || "sk-…"}
+                placeholder={
+                  settings.api_key_masked
+                    ? "••••••••••••••••"
+                    : settings.backend === "gemini"
+                    ? "AIzaSy…"
+                    : settings.backend === "anthropic"
+                    ? "sk-ant-…"
+                    : "sk-…"
+                }
                 value={apiKeyInput}
                 onChange={(e) => setApiKeyInput(e.target.value)}
                 disabled={busy}
@@ -977,11 +1040,22 @@ function AiTab() {
                 Save
               </Button>
             </SettingsRow>
-            <SettingsRow label="Model" hint='e.g. "gpt-4o-mini" or "claude-3-haiku-20240307"' last>
+            <SettingsRow
+              label="Model"
+              hint={
+                settings.backend === "gemini"
+                  ? 'e.g. "gemini-2.5-flash"'
+                  : settings.backend === "anthropic"
+                  ? 'e.g. "claude-3-haiku-20240307"'
+                  : 'e.g. "gpt-4o-mini"'
+              }
+              last
+            >
               <input
                 className="wv-input"
                 type="text"
                 defaultValue={settings.model}
+                key={settings.backend}
                 disabled={busy}
                 onBlur={(e) => void saveModel(e.target.value)}
                 style={{ width: "200px" }}

@@ -8,9 +8,9 @@
 //!   - voicenote-worker sidecar management (Parakeet TDT 0.6B v3 via sherpa-onnx)
 //!   - Auto-paste via enigo (types text into the active app)
 
+#[allow(dead_code)]
 mod ai;
 
-use ai::{AiConfig, AiModel, AiPreset, AiProvider, TransformError};
 use std::io::Write;
 use std::path::Path;
 use rubato::{
@@ -99,6 +99,8 @@ struct AppState {
     /// Waveform color (hex/CSS)
     waveform_color: Arc<Mutex<String>>,
 
+    /// Which local ASR model is active: "parakeet" | "canary_qwen_2_5b"
+    active_model_id: Arc<Mutex<String>>,
     /// Active ASR model identifier.
     asr_model: Arc<Mutex<String>>,
     /// Active ASR backend identifier.
@@ -127,6 +129,16 @@ struct AppState {
     profile_hotkeys: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// Profile currently being applied (set on profile hotkey press, cleared after paste)
     active_profile: Arc<Mutex<Option<String>>>,
+    /// OpenAI API key loaded from keyring/encrypted storage at startup
+    openai_api_key: Arc<Mutex<Option<String>>>,
+    /// Gemini API key loaded from keyring/encrypted storage at startup
+    gemini_api_key: Arc<Mutex<Option<String>>>,
+    /// Anthropic API key loaded from keyring/encrypted storage at startup
+    anthropic_api_key: Arc<Mutex<Option<String>>>,
+    /// Target language for translate/clean_translate presets
+    ai_target_language: Arc<Mutex<String>>,
+    /// Shared HTTP client for AI provider requests (reqwest is cheap to clone)
+    http_client: reqwest::Client,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -158,6 +170,7 @@ impl AppState {
             mic_device: Arc::new(Mutex::new(None)),
             debug_mic_level: Arc::new(AtomicBool::new(false)),
             waveform_color: Arc::new(Mutex::new("#3082ff".to_string())),
+            active_model_id: Arc::new(Mutex::new("parakeet".to_string())),
             asr_model: Arc::new(Mutex::new("small".to_string())),
             asr_backend: Arc::new(Mutex::new("faster-whisper".to_string())),
             runtime_profile: Arc::new(Mutex::new("balanced".to_string())),
@@ -176,6 +189,14 @@ impl AppState {
             ai_ollama_url: Arc::new(Mutex::new("http://localhost:11434".to_string())),
             profile_hotkeys: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_profile: Arc::new(Mutex::new(None)),
+            openai_api_key: Arc::new(Mutex::new(None)),
+            gemini_api_key: Arc::new(Mutex::new(None)),
+            anthropic_api_key: Arc::new(Mutex::new(None)),
+            ai_target_language: Arc::new(Mutex::new(String::new())),
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
         }
     }
 }
@@ -267,15 +288,18 @@ struct AiSettingsInfo {
 
 #[tauri::command]
 async fn get_ai_settings(state: tauri::State<'_, SharedState>) -> Result<AiSettingsInfo, String> {
-    let raw_key = keyring::Entry::new("voicenote", "ai_api_key")
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .unwrap_or_default();
+    let backend = state.ai_backend.lock().unwrap().clone();
+    let has_key = match backend.as_str() {
+        "openai"    => state.openai_api_key.lock().unwrap().is_some(),
+        "gemini"    => state.gemini_api_key.lock().unwrap().is_some(),
+        "anthropic" => state.anthropic_api_key.lock().unwrap().is_some(),
+        _           => false,
+    };
     Ok(AiSettingsInfo {
         default_mode: state.ai_default_mode.lock().unwrap().clone(),
-        backend: state.ai_backend.lock().unwrap().clone(),
+        backend,
         model: state.ai_model.lock().unwrap().clone(),
-        api_key_masked: mask_token(&raw_key),
+        api_key_masked: if has_key { mask_token("set") } else { String::new() },
         ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
         profile_hotkeys: state.profile_hotkeys.lock().unwrap().clone(),
     })
@@ -310,14 +334,7 @@ async fn set_ai_backend(
     if !VALID.contains(&backend.as_str()) {
         return Err(format!("Unknown AI backend: {}", backend));
     }
-    // Bridge to the typed ai_provider field used by the execution engine.
-    let provider = match backend.as_str() {
-        "openai" => Some("openai".to_string()),
-        "gemini" => Some("gemini".to_string()),
-        _ => None,
-    };
     *state.ai_backend.lock().unwrap() = backend;
-    *state.ai_provider.lock().unwrap() = provider;
     save_app_settings(&app, state.inner().clone())
 }
 
@@ -335,23 +352,22 @@ async fn set_ai_api_key(
     }
     // Also store in the provider-specific keyring so the typed execution engine finds it.
     let backend = state.ai_backend.lock().unwrap().clone();
-    let (provider_entry, state_slot) = match backend.as_str() {
-        "openai" => (Some(openai_keyring_entry()), Some("openai")),
-        "gemini" => (Some(gemini_keyring_entry()), Some("gemini")),
-        _ => (None, None),
+    let (provider_entry, file_key, state_slot) = match backend.as_str() {
+        "openai"    => (Some(openai_keyring_entry()),    "openai_api_key",    Some("openai")),
+        "gemini"    => (Some(gemini_keyring_entry()),    "gemini_api_key",    Some("gemini")),
+        "anthropic" => (Some(anthropic_keyring_entry()), "anthropic_api_key", Some("anthropic")),
+        _           => (None,                            "",                  None),
     };
     if let Some(pe) = provider_entry {
-        if key.is_empty() {
-            let _ = pe.delete_credential();
-        } else {
-            pe.set_password(&key).map_err(|e| e.to_string())?;
-        }
+        let val = if key.is_empty() { None } else { Some(key.as_str()) };
+        let _ = save_ai_secret(&app, file_key, pe, val);
     }
     if let Some(slot) = state_slot {
         let val = if key.is_empty() { None } else { Some(key) };
         match slot {
-            "openai" => *state.openai_api_key.lock().unwrap() = val,
-            "gemini" => *state.gemini_api_key.lock().unwrap() = val,
+            "openai"    => *state.openai_api_key.lock().unwrap()    = val,
+            "gemini"    => *state.gemini_api_key.lock().unwrap()    = val,
+            "anthropic" => *state.anthropic_api_key.lock().unwrap() = val,
             _ => {}
         }
     }
@@ -546,6 +562,8 @@ struct AppSettings {
     debug_mic_level: bool,
     #[serde(default = "default_waveform_color")]
     waveform_color: String,
+    #[serde(default = "default_active_model_id")]
+    active_model_id: String,
     #[serde(default = "default_asr_model")]
     asr_model: String,
     #[serde(default = "default_asr_backend")]
@@ -570,10 +588,16 @@ struct AppSettings {
     ai_ollama_url: String,
     #[serde(default)]
     profile_hotkeys: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    ai_target_language: String,
 }
 
 fn default_waveform_color() -> String {
     "#3082ff".to_string()
+}
+
+fn default_active_model_id() -> String {
+    "parakeet".to_string()
 }
 
 fn default_asr_model() -> String {
@@ -624,6 +648,26 @@ async fn set_asr_model(
         return Err("Model cannot be empty".to_string());
     }
     *state.asr_model.lock().unwrap() = model;
+    save_app_settings(&app, state.inner().clone())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_active_model_id(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    Ok(state.active_model_id.lock().unwrap().clone())
+}
+
+#[tauri::command]
+async fn set_active_model_id(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    model_id: String,
+) -> Result<(), String> {
+    let valid = ["parakeet", "canary_qwen_2_5b"];
+    if !valid.contains(&model_id.as_str()) {
+        return Err(format!("Unknown model id: {}", model_id));
+    }
+    *state.active_model_id.lock().unwrap() = model_id;
     save_app_settings(&app, state.inner().clone())?;
     Ok(())
 }
@@ -790,15 +834,14 @@ async fn get_shortcut_status(
 
 // ─── Model Management Commands ────────────────────────────────────────────────
 
-/// The four files that must exist for the Parakeet-TDT worker to run.
-/// Sizes match the multilingual v3 INT8 model (25 European languages).
 struct ModelFileSpec {
     name: &'static str,
     expected_bytes: u64,
     sha256: Option<&'static str>,
 }
 
-const MODEL_FILES: &[ModelFileSpec] = &[
+/// Parakeet-TDT 0.6B v3 INT8 — multilingual (25 European languages)
+const PARAKEET_FILES: &[ModelFileSpec] = &[
     ModelFileSpec {
         name: "encoder.int8.onnx",
         expected_bytes: 652_000_000,
@@ -817,22 +860,59 @@ const MODEL_FILES: &[ModelFileSpec] = &[
     ModelFileSpec {
         name: "tokens.txt",
         expected_bytes: 93_900,
-        // tokens.txt is checked by expected size; hash pinning is enforced for ONNX artifacts.
         sha256: None,
     },
 ];
 
-/// Ordered list of base URLs to try for each model file.
-/// Points to the multilingual Parakeet TDT 0.6B v3 INT8 (25 European languages:
-/// Danish, English, Russian, French, German, Spanish, Polish, etc.)
-const DOWNLOAD_BASES: &[&str] = &[
+const PARAKEET_DOWNLOAD_BASES: &[&str] = &[
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main",
 ];
 
+/// Canary-Qwen-2.5B INT8 — English only, encoder-decoder architecture
+const CANARY_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec {
+        name: "encoder.int8.onnx",
+        expected_bytes: 132_678_643,
+        sha256: Some("7a75b4e2a5857a6dcc0819503bbe3fad66943db4a3ccf21d3f27c633667d303f"),
+    },
+    ModelFileSpec {
+        name: "decoder.int8.onnx",
+        expected_bytes: 74_437_848,
+        sha256: Some("e41a2ab9c0c2fe81a1e8ade5a45fb02a74bc4db7d1f91b89a54a25e2cf79cba2"),
+    },
+    ModelFileSpec {
+        name: "tokens.txt",
+        expected_bytes: 53_555,
+        sha256: None,
+    },
+];
+
+const CANARY_DOWNLOAD_BASES: &[&str] = &[
+    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-canary-qwen2.5-0.5b-int8/resolve/main",
+];
+
+fn model_specs_for(model_id: &str) -> &'static [ModelFileSpec] {
+    match model_id {
+        "canary_qwen_2_5b" => CANARY_FILES,
+        _ => PARAKEET_FILES,
+    }
+}
+
+fn download_bases_for(model_id: &str) -> &'static [&'static str] {
+    match model_id {
+        "canary_qwen_2_5b" => CANARY_DOWNLOAD_BASES,
+        _ => PARAKEET_DOWNLOAD_BASES,
+    }
+}
+
 fn model_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    model_dir_for(app, "parakeet")
+}
+
+fn model_dir_for(app: &AppHandle, model_id: &str) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map(|p| p.join("models").join("parakeet"))
+        .map(|p| p.join("models").join(model_id))
         .map_err(|e| e.to_string())
 }
 
@@ -852,12 +932,16 @@ struct ModelStatus {
 }
 
 #[tauri::command]
-async fn get_model_status(app: AppHandle) -> Result<ModelStatus, String> {
-    let dir = model_data_dir(&app)?;
+async fn get_model_status(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<ModelStatus, String> {
+    let model_id = state.active_model_id.lock().unwrap().clone();
+    let dir = model_dir_for(&app, &model_id)?;
     let mut files = Vec::new();
     let mut all_present = true;
 
-    for spec in MODEL_FILES {
+    for spec in model_specs_for(&model_id) {
         let path = dir.join(spec.name);
         let exists = path.exists();
         let actual_bytes = if exists {
@@ -900,7 +984,8 @@ async fn download_model(
 ) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
-    let dir = model_data_dir(&app)?;
+    let model_id = state.active_model_id.lock().unwrap().clone();
+    let dir = model_dir_for(&app, &model_id)?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create model directory: {}", e))?;
 
@@ -911,11 +996,13 @@ async fn download_model(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let total_files = MODEL_FILES.len();
+    let specs = model_specs_for(&model_id);
+    let bases = download_bases_for(&model_id);
+    let total_files = specs.len();
 
     use futures_util::StreamExt;
 
-    for (idx, spec) in MODEL_FILES.iter().enumerate() {
+    for (idx, spec) in specs.iter().enumerate() {
         let name = spec.name;
         let expected_size = spec.expected_bytes;
         let dest = dir.join(name);
@@ -954,7 +1041,7 @@ async fn download_model(
         // Try each base URL in order; stop at the first that succeeds.
         let mut response = None;
         let mut last_err = String::new();
-        for &base in DOWNLOAD_BASES {
+        for &base in bases {
             let url = format!("{}/{}", base, name);
             let mut req = client.get(&url);
             if let Some(ref token) = hf_token {
@@ -1033,11 +1120,15 @@ struct HealthStatus {
 }
 
 #[tauri::command]
-async fn run_health_check(app: AppHandle) -> Result<HealthStatus, String> {
+async fn run_health_check(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<HealthStatus, String> {
     let worker = worker_binary_path();
     let worker_exists = worker.exists();
-    let model_dir = model_data_dir(&app).unwrap_or_default();
-    let model_exists = MODEL_FILES.iter().all(|spec| model_dir.join(spec.name).exists());
+    let model_id = state.active_model_id.lock().unwrap().clone();
+    let model_dir = model_dir_for(&app, &model_id).unwrap_or_default();
+    let model_exists = model_specs_for(&model_id).iter().all(|spec| model_dir.join(spec.name).exists());
     Ok(HealthStatus {
         worker_path: worker.to_string_lossy().into_owned(),
         worker_exists,
@@ -1335,6 +1426,7 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         mic_device: state.mic_device.lock().unwrap().clone(),
         debug_mic_level: state.debug_mic_level.load(Ordering::SeqCst),
         waveform_color: state.waveform_color.lock().unwrap().clone(),
+        active_model_id: state.active_model_id.lock().unwrap().clone(),
         asr_model: state.asr_model.lock().unwrap().clone(),
         asr_backend: state.asr_backend.lock().unwrap().clone(),
         runtime_profile: state.runtime_profile.lock().unwrap().clone(),
@@ -1347,6 +1439,7 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         ai_model: state.ai_model.lock().unwrap().clone(),
         ai_ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
         profile_hotkeys: state.profile_hotkeys.lock().unwrap().clone(),
+        ai_target_language: state.ai_target_language.lock().unwrap().clone(),
     };
     let payload = serde_json::to_string(&settings)
         .map_err(|e| format!("Failed to serialize app settings: {}", e))?;
@@ -1370,20 +1463,31 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
         .debug_mic_level
         .store(settings.debug_mic_level, Ordering::SeqCst);
     *state.waveform_color.lock().unwrap() = settings.waveform_color;
+    *state.active_model_id.lock().unwrap() = settings.active_model_id;
     *state.asr_model.lock().unwrap() = settings.asr_model;
     *state.asr_backend.lock().unwrap() = settings.asr_backend;
     *state.runtime_profile.lock().unwrap() = settings.runtime_profile;
     *state.onnx_provider.lock().unwrap() = settings.onnx_provider;
-    *state.ai_preset.lock().unwrap() = settings.ai_preset;
-    *state.ai_provider.lock().unwrap() = settings.ai_provider;
-    *state.ai_model.lock().unwrap() = settings.ai_model;
     *state.ai_target_language.lock().unwrap() = settings.ai_target_language;
     let keyring_token = load_hf_token_secret();
     *state.hf_token.lock().unwrap() = keyring_token.clone().or(settings.hf_token.clone());
-    *state.openai_api_key.lock().unwrap() =
-        load_ai_secret(app, "openai_api_key", openai_keyring_entry());
-    *state.gemini_api_key.lock().unwrap() =
-        load_ai_secret(app, "gemini_api_key", gemini_keyring_entry());
+    let openai_entry = openai_keyring_entry();
+    if let Err(ref e) = openai_entry {
+        eprintln!("[keyring] Failed to init OpenAI entry: {}", e);
+    }
+    *state.openai_api_key.lock().unwrap() = load_ai_secret(app, "openai_api_key", openai_entry);
+
+    let gemini_entry = gemini_keyring_entry();
+    if let Err(ref e) = gemini_entry {
+        eprintln!("[keyring] Failed to init Gemini entry: {}", e);
+    }
+    *state.gemini_api_key.lock().unwrap() = load_ai_secret(app, "gemini_api_key", gemini_entry);
+
+    let anthropic_entry = anthropic_keyring_entry();
+    if let Err(ref e) = anthropic_entry {
+        eprintln!("[keyring] Failed to init Anthropic entry: {}", e);
+    }
+    *state.anthropic_api_key.lock().unwrap() = load_ai_secret(app, "anthropic_api_key", anthropic_entry);
     if keyring_token.is_none() {
         if let Some(legacy) = settings.hf_token.as_deref() {
             if !legacy.trim().is_empty() {
@@ -1423,6 +1527,11 @@ fn openai_keyring_entry() -> Result<keyring::Entry, String> {
 
 fn gemini_keyring_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new("com.voicenote.app", "gemini_api_key")
+        .map_err(|e| format!("Keyring initialization failed: {}", e))
+}
+
+fn anthropic_keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new("com.voicenote.app", "anthropic_api_key")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
@@ -1863,6 +1972,7 @@ fn start_audio_capture(
         let channels_for_callback = actual_channels as usize;
         let stop_for_callback = stop_flag.clone();
         let app_for_callback = app.clone();
+        let mut last_level_ms = 0u64;
 
         // Build the input stream — this sets up the mic capture pipeline
         let stream = match device.build_input_stream(
@@ -1896,7 +2006,11 @@ fn start_audio_capture(
                 if count > 0 {
                     let rms = (sum_sq / count as f32).sqrt();
                     let level = (rms * 8.0).clamp(0.0, 1.0);
-                    let _ = app_for_callback.emit("recording-level", level);
+                    let now = now_millis();
+                    if now.saturating_sub(last_level_ms) >= 33 {
+                        last_level_ms = now;
+                        let _ = app_for_callback.emit("recording-level", level);
+                    }
                 }
             },
             |err| eprintln!("Audio stream error: {}", err),
@@ -2186,50 +2300,6 @@ fn worker_binary_path() -> std::path::PathBuf {
     std::path::PathBuf::from(bin_name)
 }
 
-fn current_ai_config(state: &SharedState) -> AiConfig {
-    let preset = state.ai_preset.lock().unwrap().clone();
-    let provider = state
-        .ai_provider
-        .lock()
-        .unwrap()
-        .clone()
-        .and_then(|value| AiProvider::from_settings_value(&value));
-    let model = state
-        .ai_model
-        .lock()
-        .unwrap()
-        .clone()
-        .and_then(|value| AiModel::from_settings_value(&value));
-    let target_language = state.ai_target_language.lock().unwrap().clone();
-    AiConfig {
-        preset: AiPreset::from_settings_value(&preset).unwrap_or(AiPreset::Raw),
-        provider,
-        model,
-        target_language,
-    }
-}
-
-fn current_provider_key(state: &SharedState, provider: AiProvider) -> Option<String> {
-    match provider {
-        AiProvider::OpenAi => state.openai_api_key.lock().unwrap().clone(),
-        AiProvider::Gemini => state.gemini_api_key.lock().unwrap().clone(),
-    }
-}
-
-async fn transform_transcript_if_enabled(
-    state: SharedState,
-    transcript: String,
-) -> Result<String, TransformError> {
-    let config = current_ai_config(&state);
-    let provider = config.provider;
-    let api_key = provider.and_then(|value| current_provider_key(&state, value));
-    let request = match ai::validate_transform_input(&config, &transcript, api_key.as_deref())? {
-        Some(request) => request,
-        None => return Ok(transcript),
-    };
-    ai::transform_with_provider(&state.http_client, &request).await
-}
-
 fn finish_transcript_request(state: &SharedState) {
     state.sidecar_busy.store(false, Ordering::SeqCst);
     state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
@@ -2267,10 +2337,9 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
         state.provider_runtime.lock().unwrap().clone(),
     );
 
-    // Pass the exact model dir so the worker doesn't have to guess.
-    // model_data_dir() uses Tauri's app_data_dir() which is the same
-    // path used by the download command — they will always agree.
-    let model_dir = model_data_dir(&app)
+    // Pass model id and exact dir so the worker doesn't have to guess.
+    let model_id = state.active_model_id.lock().unwrap().clone();
+    let model_dir = model_dir_for(&app, &model_id)
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
@@ -2278,6 +2347,7 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
     let mut command = std::process::Command::new(&program);
     command
         .env("VOICENOTE_PROVIDER", &provider)
+        .env("VOICENOTE_MODEL_ID", &model_id)
         .env("VOICENOTE_MODEL_DIR", &model_dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2335,7 +2405,7 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     }
                 }
                 Ok(text) if text.starts_with("ERROR:") => {
-                    let msg = text[6..].trim().to_string();
+                    let msg = text.strip_prefix("ERROR:").unwrap_or("").trim().to_string();
                     eprintln!("Sidecar error: {}", msg);
                     app_stdout
                         .emit("transcription-error", serde_json::json!({"message": msg}))
@@ -2354,7 +2424,7 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     }
                 }
                 Ok(text) if text.starts_with("STATUS:") => {
-                    let msg = text["STATUS:".len()..].to_string();
+                    let msg = text.strip_prefix("STATUS:").unwrap_or("").to_string();
                     println!("[worker] {}", msg);
                     // Forward to VoiceBar so it can show the current worker state
                     let _ = app_stdout.emit("sidecar-status", serde_json::json!({ "message": msg }));
@@ -2363,7 +2433,7 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                         .store(now_millis(), Ordering::SeqCst);
                 }
                 Ok(text) if text.starts_with("TRANSCRIPT:") => {
-                    let transcript = text["TRANSCRIPT:".len()..].trim().to_string();
+                    let transcript = text.strip_prefix("TRANSCRIPT:").unwrap_or("").trim().to_string();
                     if transcript.is_empty() {
                         continue;
                     }
@@ -2398,12 +2468,17 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                         let backend = state_for_stdout.ai_backend.lock().unwrap().clone();
                         let model = state_for_stdout.ai_model.lock().unwrap().clone();
                         let ollama_url = state_for_stdout.ai_ollama_url.lock().unwrap().clone();
-                        let api_key = keyring::Entry::new("voicenote", "ai_api_key")
-                            .ok()
-                            .and_then(|e| e.get_password().ok())
-                            .unwrap_or_default();
+                        // Read from the encrypted in-memory store (loaded at startup via DPAPI
+                        // on Windows, OS keyring on other platforms). Never re-read from disk here.
+                        let api_key = match backend.as_str() {
+                            "openai"    => state_for_stdout.openai_api_key.lock().unwrap().clone().unwrap_or_default(),
+                            "gemini"    => state_for_stdout.gemini_api_key.lock().unwrap().clone().unwrap_or_default(),
+                            "anthropic" => state_for_stdout.anthropic_api_key.lock().unwrap().clone().unwrap_or_default(),
+                            _           => String::new(), // Ollama needs no API key
+                        };
 
                         match tauri::async_runtime::block_on(apply_ai_with_prompt(
+                            &state_for_stdout.http_client,
                             &transcript,
                             prompt,
                             &backend,
@@ -2427,7 +2502,9 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     };
 
                     // Auto-paste the result into the previously active app
-                    paste_text(&final_text);
+                    if !final_text.trim().is_empty() {
+                        paste_text(&final_text);
+                    }
 
                     // Notify the Voice Bar UI
                     let _ = app_stdout.emit(
@@ -2518,6 +2595,7 @@ fn kill_sidecar(state: &SharedState) {
 
 /// Core AI call — sends `transcript` to the backend with the given `system_prompt`.
 async fn apply_ai_with_prompt(
+    client: &reqwest::Client,
     transcript: &str,
     system_prompt: &str,
     backend: &str,
@@ -2525,7 +2603,6 @@ async fn apply_ai_with_prompt(
     api_key: &str,
     ollama_url: &str,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
 
     match backend {
         "openai" => {
@@ -2544,11 +2621,15 @@ async fn apply_ai_with_prompt(
                 .send()
                 .await
                 .map_err(|e| format!("OpenAI request failed: {}", e))?;
+            let status = resp.status();
             let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            if !status.is_success() {
+                return Err(format!("OpenAI request failed with status {}", status));
+            }
             json["choices"][0]["message"]["content"]
                 .as_str()
                 .map(|s| s.trim().to_string())
-                .ok_or_else(|| format!("Unexpected OpenAI response: {}", json))
+                .ok_or_else(|| "OpenAI returned no usable text".to_string())
         }
         "anthropic" => {
             let body = serde_json::json!({
@@ -2565,11 +2646,15 @@ async fn apply_ai_with_prompt(
                 .send()
                 .await
                 .map_err(|e| format!("Anthropic request failed: {}", e))?;
+            let status = resp.status();
             let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            if !status.is_success() {
+                return Err(format!("Anthropic request failed with status {}", status));
+            }
             json["content"][0]["text"]
                 .as_str()
                 .map(|s| s.trim().to_string())
-                .ok_or_else(|| format!("Unexpected Anthropic response: {}", json))
+                .ok_or_else(|| "Anthropic returned no usable text".to_string())
         }
         "gemini" => {
             let body = serde_json::json!({
@@ -2578,20 +2663,25 @@ async fn apply_ai_with_prompt(
                 "generationConfig": {"maxOutputTokens": 1024}
             });
             let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-                model, api_key
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                model
             );
             let resp = client
                 .post(&url)
+                .header("x-goog-api-key", api_key)
                 .json(&body)
                 .send()
                 .await
                 .map_err(|e| format!("Gemini request failed: {}", e))?;
+            let status = resp.status();
             let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            if !status.is_success() {
+                return Err(format!("Gemini request failed with status {}", status));
+            }
             json["candidates"][0]["content"]["parts"][0]["text"]
                 .as_str()
                 .map(|s| s.trim().to_string())
-                .ok_or_else(|| format!("Unexpected Gemini response: {}", json))
+                .ok_or_else(|| "Gemini returned no usable text".to_string())
         }
         "ollama" => {
             let body = serde_json::json!({
@@ -2609,11 +2699,15 @@ async fn apply_ai_with_prompt(
                 .send()
                 .await
                 .map_err(|e| format!("Ollama request failed: {}", e))?;
+            let status = resp.status();
             let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            if !status.is_success() {
+                return Err(format!("Ollama request failed with status {}", status));
+            }
             json["message"]["content"]
                 .as_str()
                 .map(|s| s.trim().to_string())
-                .ok_or_else(|| format!("Unexpected Ollama response: {}", json))
+                .ok_or_else(|| "Ollama returned no usable text".to_string())
         }
         other => Err(format!("Unknown AI backend: {}", other)),
     }
@@ -2882,6 +2976,8 @@ pub fn run() {
             check_for_updates,
             get_shortcut,
             get_waveform_color,
+            get_active_model_id,
+            set_active_model_id,
             get_asr_model,
             get_asr_backend,
             get_runtime_profile,
@@ -3071,49 +3167,6 @@ mod ai_settings_tests {
         assert!(AiProvider::from_settings_value("openai").is_some());
         assert!(AiProvider::from_settings_value("gemini").is_some());
         assert!(AiProvider::from_settings_value("other").is_none());
-    }
-
-    #[test]
-    fn current_ai_config_reads_state_values() {
-        let state: SharedState = Arc::new(AppState::new());
-        *state.ai_preset.lock().unwrap() = "clean_translate".to_string();
-        *state.ai_provider.lock().unwrap() = Some("gemini".to_string());
-        *state.ai_model.lock().unwrap() = Some("gemini-3-flash-preview".to_string());
-        *state.ai_target_language.lock().unwrap() = Some("Danish".to_string());
-
-        let config = current_ai_config(&state);
-
-        assert_eq!(config.preset, AiPreset::CleanTranslate);
-        assert_eq!(config.provider, Some(AiProvider::Gemini));
-        assert_eq!(config.model, Some(ai::AiModel::Gemini3FlashPreview));
-        assert_eq!(config.target_language.as_deref(), Some("Danish"));
-    }
-
-    #[test]
-    fn current_provider_key_reads_only_selected_provider() {
-        let state: SharedState = Arc::new(AppState::new());
-        *state.openai_api_key.lock().unwrap() = Some("openai-key".to_string());
-        *state.gemini_api_key.lock().unwrap() = Some("gemini-key".to_string());
-
-        assert_eq!(
-            current_provider_key(&state, AiProvider::OpenAi).as_deref(),
-            Some("openai-key")
-        );
-        assert_eq!(
-            current_provider_key(&state, AiProvider::Gemini).as_deref(),
-            Some("gemini-key")
-        );
-    }
-
-    #[tokio::test]
-    async fn transform_transcript_if_enabled_returns_raw_transcript_when_disabled() {
-        let state: SharedState = Arc::new(AppState::new());
-
-        let result = transform_transcript_if_enabled(state, "hej verden".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(result, "hej verden");
     }
 
     #[test]
