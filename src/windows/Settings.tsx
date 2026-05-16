@@ -105,45 +105,6 @@ function PaneHeader({ title, subtitle }: { title: string; subtitle: string }) {
   );
 }
 
-function ChoiceGroup({
-  children,
-  compact = false,
-}: {
-  children: React.ReactNode;
-  compact?: boolean;
-}) {
-  return (
-    <div className="wv-choice-group" data-compact={compact ? "1" : "0"}>
-      {children}
-    </div>
-  );
-}
-
-function ChoiceButton({
-  active,
-  onClick,
-  disabled,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  disabled?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      className="wv-choice-btn"
-      data-active={active ? "1" : "0"}
-      aria-pressed={active}
-      onClick={onClick}
-      disabled={disabled}
-    >
-      {children}
-    </button>
-  );
-}
-
 
 function Sidebar({ active, onSelect }: { active: Page; onSelect: (page: Page) => void }) {
   const tabs: Array<{ id: Page; label: string; icon: React.ReactNode }> = [
