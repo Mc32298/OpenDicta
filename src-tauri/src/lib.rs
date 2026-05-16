@@ -2435,6 +2435,12 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                 Ok(text) if text.starts_with("TRANSCRIPT:") => {
                     let transcript = text.strip_prefix("TRANSCRIPT:").unwrap_or("").trim().to_string();
                     if transcript.is_empty() {
+                        let _ = app_stdout.emit(
+                            "transcription-error",
+                            serde_json::json!({"message": "No speech detected."}),
+                        );
+                        hide_voicebar(&app_stdout);
+                        finish_transcript_request(&state_for_stdout);
                         continue;
                     }
                     #[cfg(debug_assertions)]
