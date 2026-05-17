@@ -23,9 +23,25 @@ export default function VoiceBar() {
   const doneHideTimerRef   = useRef<number | null>(null);
   const errorHideTimerRef  = useRef<number | null>(null);
   const cancelHideTimerRef = useRef<number | null>(null);
+  const aiWarningRef       = useRef<string | null>(null);
   // Single AudioContext reused across transcriptions; closed on unmount.
   const audioCtxRef = useRef<AudioContext | null>(null);
   const completionSoundRef = useRef(false);
+
+  function playChime(frequency: number, duration = 0.11, gainValue = 0.11) {
+    if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+    const ctx = audioCtxRef.current;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.setValueAtTime(frequency, ctx.currentTime);
+    gain.gain.setValueAtTime(gainValue, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+    osc.start();
+    osc.stop(ctx.currentTime + duration);
+  }
 
   // Recording elapsed timer
   useEffect(() => {
@@ -86,6 +102,7 @@ export default function VoiceBar() {
       setState("recording");
       setStatusText("Listening…");
       setLastError(null);
+      if (completionSoundRef.current) playChime(660, 0.09, 0.09);
     });
 
     const unlistenShortcut = listen<{ state?: string }>("shortcut-triggered", (event) => {
@@ -95,6 +112,7 @@ export default function VoiceBar() {
     const unlistenStop = listen("recording-stopped", () => {
       setState("processing");
       setStatusText("Transcribing…");
+      if (completionSoundRef.current) playChime(520, 0.12, 0.08);
     });
 
     const unlistenWorkerStatus = listen<{ message: string }>("sidecar-status", (event) => {
@@ -108,25 +126,16 @@ export default function VoiceBar() {
       clearHideTimers();
       setState("done");
       setLastError(null);
-      const t = event.payload.text;
-      setStatusText(t.slice(0, 64) + (t.length > 64 ? "…" : ""));
-
-      // Play completion sound if enabled (read from ref to avoid stale closure)
-      if (completionSoundRef.current) {
-        if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-        const ctx = audioCtxRef.current;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.frequency.value = 880;
-        gain.gain.setValueAtTime(0.15, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
-        osc.start();
-        osc.stop(ctx.currentTime + 0.12);
+      const warning = aiWarningRef.current;
+      if (warning) {
+        setStatusText(warning);
+        aiWarningRef.current = null;
+        doneHideTimerRef.current = window.setTimeout(hideAndReset, 2600);
+      } else {
+        const t = event.payload.text;
+        setStatusText(t.slice(0, 64) + (t.length > 64 ? "…" : ""));
+        doneHideTimerRef.current = window.setTimeout(hideAndReset, 1600);
       }
-
-      doneHideTimerRef.current = window.setTimeout(hideAndReset, 1600);
     });
 
     const unlistenError = listen<{ message: string }>("transcription-error", (event) => {
@@ -135,6 +144,12 @@ export default function VoiceBar() {
       setLastError(event.payload.message);
       setStatusText(event.payload.message);
       errorHideTimerRef.current = window.setTimeout(hideAndReset, 2500);
+    });
+    const unlistenAiWarning = listen<{ message: string }>("ai-processing-warning", (event) => {
+      aiWarningRef.current = event.payload.message;
+      setVisible(true);
+      setState((s) => (s === "processing" ? "processing" : s));
+      setStatusText(event.payload.message);
     });
 
     const unlistenLevel = listen<number>("recording-level", (event) => {
@@ -158,6 +173,12 @@ export default function VoiceBar() {
       setActiveProfile(event.payload ?? null);
     });
 
+    const unlistenCompletionSound = listen<{ enabled?: boolean }>("completion-sound-changed", (event) => {
+      const enabled = Boolean(event.payload?.enabled);
+      setCompletionSound(enabled);
+      completionSoundRef.current = enabled;
+    });
+
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
@@ -168,6 +189,7 @@ export default function VoiceBar() {
       unlistenStop.then(fn => fn());
       unlistenDone.then(fn => fn());
       unlistenError.then(fn => fn());
+      unlistenAiWarning.then(fn => fn());
       unlistenLevel.then(fn => fn());
       unlistenColor.then(fn => fn());
       unlistenWorkerStatus.then(fn => fn());
@@ -175,6 +197,7 @@ export default function VoiceBar() {
       unlistenShow.then(fn => fn());
       unlistenHide.then(fn => fn());
       unlistenProfile.then(fn => fn());
+      unlistenCompletionSound.then(fn => fn());
     };
   }, []);
 
@@ -234,6 +257,7 @@ export default function VoiceBar() {
 
   function hideAndReset() {
     clearHideTimers();
+    aiWarningRef.current = null;
     setState("idle");
     setStatusText("Ready");
     setVisible(false);

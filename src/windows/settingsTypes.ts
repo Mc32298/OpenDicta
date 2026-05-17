@@ -10,7 +10,18 @@ export interface ProfileInfo {
   hotkey: string | null;
 }
 
-export type AiDefaultMode = "raw" | "clean" | "translate" | "clean_translate";
+export type AiDefaultMode =
+  | "raw"
+  | "grammar"
+  | "email"
+  | "prompt"
+  | "pro"
+  | "bullets"
+  | "chat"
+  | "summary"
+  | "clean"
+  | "translate"
+  | "clean_translate";
 
 export interface AiSettings {
   default_mode: AiDefaultMode;

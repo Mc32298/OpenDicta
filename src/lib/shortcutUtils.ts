@@ -1,4 +1,4 @@
-export const DEFAULT_SHORTCUT = "ControlRight";
+export const DEFAULT_SHORTCUT = "Ctrl+-";
 
 export function normalizeShortcutFromEvent(e: KeyboardEvent): string | null {
   const code = e.code;
@@ -19,7 +19,9 @@ export function normalizeShortcutFromEvent(e: KeyboardEvent): string | null {
   if (e.metaKey) parts.push("Super");
 
   let base: string | null = null;
-  if (/^Key[A-Z]$/.test(code)) base = code.slice(3);
+  // Use layout-aware printable keys first so Nordic layouts capture expected symbols.
+  if (key && key.length === 1) base = key.toUpperCase();
+  else if (/^Key[A-Z]$/.test(code)) base = code.slice(3);
   else if (/^Digit[0-9]$/.test(code)) base = code.slice(5);
   else if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) base = code;
   else if (code === "Space") base = "Space";
@@ -54,7 +56,6 @@ export function normalizeShortcutFromEvent(e: KeyboardEvent): string | null {
   else if (code === "NumpadDivide") base = "NumpadDivide";
   else if (code === "NumpadDecimal") base = "NumpadDecimal";
   else if (/^Numpad[0-9]$/.test(code)) base = code;
-  else if (key && key.length === 1) base = key.toUpperCase();
   if (!base) return null;
   parts.push(base);
   return parts.join("+");
