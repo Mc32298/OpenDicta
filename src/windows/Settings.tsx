@@ -18,6 +18,7 @@ const PAGE_ALIASES: Record<string, Page> = {
   model: "model",
   models: "model",
   ai: "ai",
+  productivity: "productivity",
   appearance: "appearance",
   diagnostics: "diagnostics",
   about: "about",
@@ -35,6 +36,10 @@ function getInitialPage(): Page {
 
 
 export default function Settings() {
+  return <SettingsWindow />;
+}
+
+export function SettingsWindow() {
   const [page, setPage] = useState<Page>(getInitialPage);
   const [accent, setAccent] = useState("#0A84FF");
 
@@ -75,21 +80,38 @@ export default function Settings() {
         <div className="wv-chrome-title">VoiceNote Settings</div>
         <div className="wv-chrome-spacer" />
       </div>
-      <div className="wv-body">
-        <Sidebar active={page} onSelect={setPage} />
-        <main className="wv-main">
-          <ToastProvider>
-            <div style={{ display: page === "general" ? "" : "none" }}><GeneralTab /></div>
-            <div style={{ display: page === "shortcut" ? "" : "none" }}><ShortcutTab /></div>
-            <div style={{ display: page === "microphone" ? "" : "none" }}><MicrophoneTab accent={accent} onAccentChange={setAccent} /></div>
-            <div style={{ display: page === "model" ? "" : "none" }}><ModelTab /></div>
-            <div style={{ display: page === "appearance" ? "" : "none" }}><AppearanceTab accent={accent} onAccentChange={setAccent} /></div>
-            <div style={{ display: page === "ai" ? "" : "none" }}><AiTab /></div>
-            <div style={{ display: page === "diagnostics" ? "" : "none" }}><DiagnosticsTab /></div>
-            <div style={{ display: page === "about" ? "" : "none" }}><AboutTab onNavigate={setPage} /></div>
-          </ToastProvider>
-        </main>
-      </div>
+      <SettingsContent page={page} onPageChange={setPage} accent={accent} onAccentChange={setAccent} />
+    </div>
+  );
+}
+
+export function SettingsContent({
+  page,
+  onPageChange,
+  accent,
+  onAccentChange,
+}: {
+  page: Page;
+  onPageChange: (page: Page) => void;
+  accent: string;
+  onAccentChange: (value: string) => void;
+}) {
+  return (
+    <div className="wv-body">
+      <Sidebar active={page} onSelect={onPageChange} />
+      <main className="wv-settings-main">
+        <ToastProvider>
+          <div style={{ display: page === "general" ? "" : "none" }}><GeneralTab /></div>
+          <div style={{ display: page === "shortcut" ? "" : "none" }}><ShortcutTab /></div>
+          <div style={{ display: page === "microphone" ? "" : "none" }}><MicrophoneTab accent={accent} onAccentChange={onAccentChange} /></div>
+          <div style={{ display: page === "model" ? "" : "none" }}><ModelTab /></div>
+          <div style={{ display: page === "ai" ? "" : "none" }}><AiTab /></div>
+          <div style={{ display: page === "productivity" ? "" : "none" }}><ProductivityTab /></div>
+          <div style={{ display: page === "appearance" ? "" : "none" }}><AppearanceTab accent={accent} onAccentChange={onAccentChange} /></div>
+          <div style={{ display: page === "diagnostics" ? "" : "none" }}><DiagnosticsTab /></div>
+          <div style={{ display: page === "about" ? "" : "none" }}><AboutTab onNavigate={onPageChange} /></div>
+        </ToastProvider>
+      </main>
     </div>
   );
 }
@@ -113,6 +135,7 @@ function Sidebar({ active, onSelect }: { active: Page; onSelect: (page: Page) =>
     { id: "microphone", label: "Microphone", icon: <MicIcon /> },
     { id: "model", label: "Model", icon: <BoxIcon /> },
     { id: "ai", label: "AI", icon: <ActivityIcon /> },
+    { id: "productivity", label: "Productivity", icon: <ActivityIcon /> },
     { id: "appearance", label: "Appearance", icon: <PaletteIcon /> },
     { id: "diagnostics", label: "Diagnostics", icon: <ActivityIcon /> },
     { id: "about", label: "About", icon: <InfoIcon /> },
@@ -704,6 +727,120 @@ function AppearanceTab({ accent, onAccentChange }: { accent: string; onAccentCha
           <Button variant="ghost" busy={busy} busyLabel="Resetting…" onClick={() => void resetVoicebarPosition()}>
             Reset Position
           </Button>
+        </SettingsRow>
+      </SettingsSection>
+    </div>
+  );
+}
+
+const PRODUCTIVITY_WPM_ERROR = "Enter a value from 10 to 180 WPM.";
+
+function ProductivityTab() {
+  const [baseline, setBaseline] = useState<number | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { showErr, showOk } = useToast();
+
+  useEffect(() => {
+    setBusy(true);
+    void invoke<{ typing_baseline_wpm: number }>("get_productivity_settings")
+      .then((settings) => {
+        const value = settings.typing_baseline_wpm;
+        setBaseline(value);
+        setDraft(String(value));
+        setError(null);
+      })
+      .catch((e) => showErr(`Could not load productivity settings: ${String(e)}`))
+      .finally(() => setBusy(false));
+  }, []);
+
+  const resetDraft = (value: number | null) => {
+    setDraft(value === null ? "" : String(value));
+  };
+
+  const readValidDraft = () => {
+    const value = Number(draft);
+    if (!Number.isInteger(value) || value < 10 || value > 180) {
+      return null;
+    }
+    return value;
+  };
+
+  const saveBaseline = async () => {
+    const value = readValidDraft();
+    if (value === null) {
+      setError(PRODUCTIVITY_WPM_ERROR);
+      resetDraft(baseline);
+      return;
+    }
+
+    if (value === baseline) {
+      setError(null);
+      resetDraft(baseline);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await invoke("set_typing_baseline_wpm", { value });
+      setBaseline(value);
+      setDraft(String(value));
+      setError(null);
+      showOk("Productivity settings updated.");
+    } catch (e) {
+      setError(null);
+      resetDraft(baseline);
+      showErr(`Failed to save productivity settings: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="wv-pane">
+      <PaneHeader title="Productivity" subtitle="Tune saved-time estimates to your typing speed." />
+      <SettingsSection title="Typing baseline">
+        <SettingsRow
+          label="Typing speed"
+          hint="Used to estimate how much time dictation saves compared with typing."
+          last
+        >
+          <div className="wv-inline wv-inline-stack">
+            <div className="wv-inline">
+              <input
+                className="wv-input"
+                type="number"
+                inputMode="numeric"
+                min={10}
+                max={180}
+                step={1}
+                value={draft}
+                disabled={busy || baseline === null}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  setError(null);
+                }}
+                onBlur={() => void saveBaseline()}
+                style={{ width: "88px" }}
+              />
+              <span className="wv-note">WPM</span>
+              <Button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => void saveBaseline()}
+                busy={busy}
+                busyLabel="Saving..."
+                disabled={baseline === null}
+              >
+                Save
+              </Button>
+            </div>
+            {error && (
+              <span className="wv-note" role="alert" style={{ color: "#B00020" }}>
+                {error}
+              </span>
+            )}
+          </div>
         </SettingsRow>
       </SettingsSection>
     </div>

@@ -7,11 +7,11 @@ const windowName = new URLSearchParams(window.location.search).get("window") ?? 
 // mounts. Vite deduplicates these with the lazy() calls below (same promise),
 // so by the time Suspense checks, the module is already resolved and the
 // fallback={null} transparent-window period is eliminated.
-if (windowName === "settings")    void import("./windows/Settings");
+if (windowName === "settings")    void import("./windows/MainWindow");
 else if (windowName === "onboarding") void import("./windows/Onboarding");
 else if (windowName === "empty")  void import("./windows/EmptyStates");
 
-const Settings   = lazy(() => import("./windows/Settings"));
+const MainWindow = lazy(() => import("./windows/MainWindow"));
 const Onboarding = lazy(() => import("./windows/Onboarding"));
 const EmptyStates = lazy(() => import("./windows/EmptyStates"));
 
@@ -19,7 +19,7 @@ let prefetched = false;
 function prefetchWindows() {
   if (prefetched) return;
   prefetched = true;
-  void import("./windows/Settings");
+  void import("./windows/MainWindow");
   void import("./windows/Onboarding");
   void import("./windows/EmptyStates");
 }
@@ -35,7 +35,7 @@ export default function App() {
     }
   }, []);
 
-  if (windowName === "settings")    return <Suspense fallback={null}><Settings /></Suspense>;
+  if (windowName === "settings")    return <Suspense fallback={null}><MainWindow /></Suspense>;
   if (windowName === "onboarding")  return <Suspense fallback={null}><Onboarding /></Suspense>;
   if (windowName === "empty")       return <Suspense fallback={null}><EmptyStates /></Suspense>;
   return <VoiceBar />;

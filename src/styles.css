@@ -340,6 +340,14 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   position: relative;
   z-index: 1;
 }
+.wv-settings-main {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  background: var(--bg);
+  position: relative;
+  z-index: 1;
+}
 .wv-page {
   min-height: 100%;
   animation: wv-page-in var(--motion-base);
@@ -829,4 +837,266 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   letter-spacing: 0.02em;
   pointer-events: none;
   white-space: nowrap;
+}
+
+/* ── Main dashboard window ─────────────────────────── */
+
+.wv-main-window .wv-sidebar {
+  flex-basis: 190px;
+  width: 190px;
+}
+
+.wv-main-window .wv-main > .wv-body {
+  min-height: 100%;
+}
+
+.wv-main-window .wv-main > .wv-body .wv-sidebar {
+  flex-basis: 178px;
+  width: 178px;
+}
+
+.wv-main-window .wv-main > .wv-body .wv-settings-main {
+  background: transparent;
+}
+
+.wv-dashboard,
+.wv-history-page {
+  max-width: 980px;
+}
+
+.wv-dash-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.05fr) minmax(220px, .95fr);
+  gap: 14px;
+}
+
+.wv-dash-progress,
+.wv-dash-metrics,
+.wv-dash-list,
+.wv-dash-coach,
+.wv-history-detail {
+  background: rgba(255,255,255,0.72);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(100,70,40,0.05);
+}
+
+.wv-dash-progress {
+  min-height: 240px;
+  padding: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+}
+
+.wv-progress-ring {
+  width: 152px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  position: relative;
+  background:
+    conic-gradient(var(--ac) 0 var(--progress-deg), rgba(139,107,79,0.10) var(--progress-deg) 360deg);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.65),
+    0 8px 24px rgba(100,70,40,0.10);
+}
+
+.wv-progress-ring-core {
+  width: 106px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--surface-1);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.wv-dash-progress-copy {
+  min-width: 120px;
+}
+
+.wv-dash-progress-value {
+  font-family: var(--font-display);
+  font-size: 34px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.wv-dash-progress-label,
+.wv-dash-metric-label,
+.wv-history-meta,
+.wv-history-empty {
+  color: var(--text-sub);
+  font-size: 12px;
+}
+
+.wv-dash-metrics {
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.wv-dash-metric {
+  min-height: 64px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(139,107,79,0.06);
+  border: 1px solid rgba(139,107,79,0.08);
+}
+
+.wv-dash-metric-value {
+  margin-top: 5px;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.wv-dash-list {
+  padding: 14px;
+}
+
+.wv-dash-coach {
+  min-height: 120px;
+  padding: 16px;
+  background:
+    linear-gradient(135deg, rgba(212,149,106,0.14), rgba(107,143,113,0.10)),
+    rgba(255,255,255,0.72);
+}
+
+.wv-dash-coach p {
+  margin-top: 10px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.wv-dash-section-title {
+  font-size: 11px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  font-weight: 700;
+}
+
+.wv-history-list {
+  display: grid;
+  gap: 6px;
+}
+
+.wv-history-row,
+.wv-history-row-btn {
+  width: 100%;
+}
+
+.wv-history-row {
+  display: grid;
+  gap: 5px;
+  min-height: 52px;
+  padding: 10px 11px;
+  border-radius: 9px;
+  background: rgba(139,107,79,0.06);
+  border: 1px solid rgba(139,107,79,0.08);
+}
+
+.wv-history-row[data-compact="1"] {
+  min-height: 46px;
+}
+
+.wv-history-row-btn {
+  border: 0;
+  padding: 0;
+  text-align: left;
+  background: transparent;
+  font-family: var(--font-ui);
+  cursor: pointer;
+}
+
+.wv-history-row-btn[data-active="1"] .wv-history-row {
+  background: rgba(212,149,106,0.16);
+  border-color: rgba(212,149,106,0.28);
+}
+
+.wv-history-preview {
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wv-history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wv-history-empty {
+  padding: 18px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.62);
+  border: 1px solid var(--line);
+}
+
+.wv-history-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(220px, .72fr);
+  gap: 14px;
+}
+
+.wv-history-detail {
+  padding: 16px;
+  min-height: 260px;
+}
+
+.wv-history-detail p {
+  margin-top: 12px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.wv-input--small {
+  width: 82px;
+  min-width: 82px;
+}
+
+@media (max-width: 900px) {
+  .wv-dash-grid,
+  .wv-history-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .wv-dash-progress {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .wv-main-window .wv-sidebar {
+    width: 160px;
+    flex-basis: 160px;
+  }
+
+  .wv-main-window .wv-main > .wv-body .wv-sidebar {
+    width: 150px;
+    flex-basis: 150px;
+  }
+
+  .wv-dash-progress {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }

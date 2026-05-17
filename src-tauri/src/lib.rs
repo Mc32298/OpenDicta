@@ -10,17 +10,19 @@
 
 #[allow(dead_code)]
 mod ai;
+mod history;
+mod protected_store;
 
-use std::io::Write;
-use std::path::Path;
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+use sha2::{Digest, Sha256};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
-use sha2::{Digest, Sha256};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{TrayIconBuilder, TrayIconEvent},
@@ -28,13 +30,6 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-#[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::LocalFree,
-    Security::Cryptography::{
-        CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
-    },
-};
 
 const DEFAULT_SHORTCUT: &str = "ControlRight";
 
@@ -129,6 +124,12 @@ struct AppState {
     profile_hotkeys: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// Profile currently being applied (set on profile hotkey press, cleared after paste)
     active_profile: Arc<Mutex<Option<String>>>,
+    /// Typing baseline used for productivity stats.
+    typing_baseline_wpm: Arc<Mutex<u32>>,
+    /// Metadata captured when audio is finalized and consumed when worker stdout returns.
+    pending_transcript_meta: Arc<Mutex<Option<PendingTranscriptMeta>>>,
+    /// Serializes read-modify-write transcript history appends.
+    history_write_lock: Arc<Mutex<()>>,
     /// OpenAI API key loaded from keyring/encrypted storage at startup
     openai_api_key: Arc<Mutex<Option<String>>>,
     /// Gemini API key loaded from keyring/encrypted storage at startup
@@ -146,6 +147,11 @@ struct ProviderRuntimeStatus {
     requested: String,
     effective: String,
     message: String,
+}
+
+#[derive(Clone)]
+struct PendingTranscriptMeta {
+    duration_seconds: f64,
 }
 
 impl AppState {
@@ -189,6 +195,9 @@ impl AppState {
             ai_ollama_url: Arc::new(Mutex::new("http://localhost:11434".to_string())),
             profile_hotkeys: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_profile: Arc::new(Mutex::new(None)),
+            typing_baseline_wpm: Arc::new(Mutex::new(history::DEFAULT_TYPING_BASELINE_WPM)),
+            pending_transcript_meta: Arc::new(Mutex::new(None)),
+            history_write_lock: Arc::new(Mutex::new(())),
             openai_api_key: Arc::new(Mutex::new(None)),
             gemini_api_key: Arc::new(Mutex::new(None)),
             anthropic_api_key: Arc::new(Mutex::new(None)),
@@ -206,6 +215,38 @@ fn now_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn iso_timestamp_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    unix_seconds_to_iso(now)
+}
+
+fn unix_seconds_to_iso(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = year + (month <= 2) as i64;
+    (year as i32, month as u32, day as u32)
 }
 
 fn idle_timeout_ms(profile: &str) -> u64 {
@@ -254,6 +295,35 @@ const PROFILES: &[Profile] = &[
     },
 ];
 
+fn resolve_ai_prompt_and_mode(
+    active_profile: Option<&str>,
+    default_mode: &str,
+) -> (Option<&'static str>, Option<String>) {
+    if let Some(pid) = active_profile {
+        return PROFILES
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| (Some(p.system_prompt), Some(pid.to_string())))
+            .unwrap_or((None, None));
+    }
+
+    match default_mode {
+        "clean" => (
+            Some("Fix grammar and punctuation. Preserve meaning and tone. Return only the corrected text, no explanation."),
+            Some(default_mode.to_string()),
+        ),
+        "translate" => (
+            Some("Translate to English. Return only the translation, no explanation or preamble."),
+            Some(default_mode.to_string()),
+        ),
+        "clean_translate" => (
+            Some("Fix grammar and punctuation, then translate to English. Return only the final corrected and translated text."),
+            Some(default_mode.to_string()),
+        ),
+        _ => (None, None),
+    }
+}
+
 #[derive(serde::Serialize)]
 struct ProfileInfo {
     id: String,
@@ -290,16 +360,20 @@ struct AiSettingsInfo {
 async fn get_ai_settings(state: tauri::State<'_, SharedState>) -> Result<AiSettingsInfo, String> {
     let backend = state.ai_backend.lock().unwrap().clone();
     let has_key = match backend.as_str() {
-        "openai"    => state.openai_api_key.lock().unwrap().is_some(),
-        "gemini"    => state.gemini_api_key.lock().unwrap().is_some(),
+        "openai" => state.openai_api_key.lock().unwrap().is_some(),
+        "gemini" => state.gemini_api_key.lock().unwrap().is_some(),
         "anthropic" => state.anthropic_api_key.lock().unwrap().is_some(),
-        _           => false,
+        _ => false,
     };
     Ok(AiSettingsInfo {
         default_mode: state.ai_default_mode.lock().unwrap().clone(),
         backend,
         model: state.ai_model.lock().unwrap().clone(),
-        api_key_masked: if has_key { mask_token("set") } else { String::new() },
+        api_key_masked: if has_key {
+            mask_token("set")
+        } else {
+            String::new()
+        },
         ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
         profile_hotkeys: state.profile_hotkeys.lock().unwrap().clone(),
     })
@@ -353,20 +427,36 @@ async fn set_ai_api_key(
     // Also store in the provider-specific keyring so the typed execution engine finds it.
     let backend = state.ai_backend.lock().unwrap().clone();
     let (provider_entry, file_key, state_slot) = match backend.as_str() {
-        "openai"    => (Some(openai_keyring_entry()),    "openai_api_key",    Some("openai")),
-        "gemini"    => (Some(gemini_keyring_entry()),    "gemini_api_key",    Some("gemini")),
-        "anthropic" => (Some(anthropic_keyring_entry()), "anthropic_api_key", Some("anthropic")),
-        _           => (None,                            "",                  None),
+        "openai" => (
+            Some(openai_keyring_entry()),
+            "openai_api_key",
+            Some("openai"),
+        ),
+        "gemini" => (
+            Some(gemini_keyring_entry()),
+            "gemini_api_key",
+            Some("gemini"),
+        ),
+        "anthropic" => (
+            Some(anthropic_keyring_entry()),
+            "anthropic_api_key",
+            Some("anthropic"),
+        ),
+        _ => (None, "", None),
     };
     if let Some(pe) = provider_entry {
-        let val = if key.is_empty() { None } else { Some(key.as_str()) };
+        let val = if key.is_empty() {
+            None
+        } else {
+            Some(key.as_str())
+        };
         let _ = save_ai_secret(&app, file_key, pe, val);
     }
     if let Some(slot) = state_slot {
         let val = if key.is_empty() { None } else { Some(key) };
         match slot {
-            "openai"    => *state.openai_api_key.lock().unwrap()    = val,
-            "gemini"    => *state.gemini_api_key.lock().unwrap()    = val,
+            "openai" => *state.openai_api_key.lock().unwrap() = val,
+            "gemini" => *state.gemini_api_key.lock().unwrap() = val,
             "anthropic" => *state.anthropic_api_key.lock().unwrap() = val,
             _ => {}
         }
@@ -432,7 +522,12 @@ async fn set_profile_hotkey(
         register_hotkey(&app, state.inner().clone(), hk)?;
     }
     // Unregister old hotkey for this profile if any
-    let old = state.profile_hotkeys.lock().unwrap().get(&profile_id).cloned();
+    let old = state
+        .profile_hotkeys
+        .lock()
+        .unwrap()
+        .get(&profile_id)
+        .cloned();
     if let Some(old_hk) = old {
         let _ = unregister_hotkey(&app, state.inner().clone(), &old_hk);
     }
@@ -463,6 +558,55 @@ async fn stop_recording(
 }
 
 #[tauri::command]
+fn get_transcript_history(app: AppHandle) -> Result<Vec<history::TranscriptRecord>, String> {
+    let path = transcript_history_path(&app)?;
+    history::load_history_file(&path, legacy_transcript_history_path(&app)?.as_deref())
+}
+
+#[tauri::command]
+fn get_dashboard_stats(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<history::DashboardStats, String> {
+    let path = transcript_history_path(&app)?;
+    let records =
+        history::load_history_file(&path, legacy_transcript_history_path(&app)?.as_deref())?;
+    let typing_baseline_wpm = *state.typing_baseline_wpm.lock().unwrap();
+    let settings = history::ProductivitySettings {
+        typing_baseline_wpm,
+    };
+    let now_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(history::calculate_dashboard_stats(
+        &records,
+        &settings,
+        now_unix_seconds,
+    ))
+}
+
+#[tauri::command]
+fn get_productivity_settings(
+    state: tauri::State<'_, SharedState>,
+) -> Result<history::ProductivitySettings, String> {
+    Ok(history::ProductivitySettings {
+        typing_baseline_wpm: *state.typing_baseline_wpm.lock().unwrap(),
+    })
+}
+
+#[tauri::command]
+fn set_typing_baseline_wpm(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    value: u32,
+) -> Result<(), String> {
+    let value = history::validate_typing_baseline_wpm(value)?;
+    *state.typing_baseline_wpm.lock().unwrap() = value;
+    save_app_settings(&app, state.inner().clone())
+}
+
+#[tauri::command]
 async fn cancel_recording(
     app: AppHandle,
     state: tauri::State<'_, SharedState>,
@@ -474,6 +618,7 @@ async fn cancel_recording(
     // Clear any pending AI profile so the cancelled recording doesn't bleed into
     // the next one
     *state.active_profile.lock().unwrap() = None;
+    *state.pending_transcript_meta.lock().unwrap() = None;
     let _ = app.emit("active-profile-changed", serde_json::Value::Null);
     hide_voicebar(&app);
     Ok(())
@@ -544,7 +689,10 @@ async fn set_waveform_color(
     }
     *state.waveform_color.lock().unwrap() = color.clone();
     save_app_settings(&app, state.inner().clone())?;
-    let _ = app.emit("waveform-color-changed", serde_json::json!({ "color": color }));
+    let _ = app.emit(
+        "waveform-color-changed",
+        serde_json::json!({ "color": color }),
+    );
     Ok(())
 }
 
@@ -590,6 +738,8 @@ struct AppSettings {
     profile_hotkeys: std::collections::HashMap<String, String>,
     #[serde(default)]
     ai_target_language: String,
+    #[serde(default = "default_typing_baseline_wpm")]
+    typing_baseline_wpm: u32,
 }
 
 fn default_waveform_color() -> String {
@@ -630,6 +780,10 @@ fn default_ai_model() -> String {
 
 fn default_ai_ollama_url() -> String {
     "http://localhost:11434".to_string()
+}
+
+fn default_typing_baseline_wpm() -> u32 {
+    history::DEFAULT_TYPING_BASELINE_WPM
 }
 
 #[tauri::command]
@@ -751,9 +905,13 @@ async fn set_onnx_provider(
 
 #[tauri::command]
 async fn get_hf_token(state: tauri::State<'_, SharedState>) -> Result<Option<String>, String> {
-    Ok(state.hf_token.lock().unwrap().as_ref().map(|t| mask_token(t)))
+    Ok(state
+        .hf_token
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|t| mask_token(t)))
 }
-
 
 #[tauri::command]
 async fn set_hf_token(
@@ -763,7 +921,11 @@ async fn set_hf_token(
 ) -> Result<(), String> {
     let token = token.and_then(|t| {
         let t = t.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     });
     save_hf_token_secret(token.as_deref())?;
     *state.hf_token.lock().unwrap() = token;
@@ -860,13 +1022,12 @@ const PARAKEET_FILES: &[ModelFileSpec] = &[
     ModelFileSpec {
         name: "tokens.txt",
         expected_bytes: 93_900,
-        sha256: None,
+        sha256: Some("d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"),
     },
 ];
 
-const PARAKEET_DOWNLOAD_BASES: &[&str] = &[
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main",
-];
+const PARAKEET_DOWNLOAD_BASES: &[&str] =
+    &["https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main"];
 
 /// Canary-Qwen-2.5B INT8 — English only, encoder-decoder architecture
 const CANARY_FILES: &[ModelFileSpec] = &[
@@ -883,13 +1044,12 @@ const CANARY_FILES: &[ModelFileSpec] = &[
     ModelFileSpec {
         name: "tokens.txt",
         expected_bytes: 53_555,
-        sha256: None,
+        sha256: Some("2dae6fc7815f9640645e0c765522b278ee0cef49b482d91f6913e334628d3e77"),
     },
 ];
 
-const CANARY_DOWNLOAD_BASES: &[&str] = &[
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-canary-qwen2.5-0.5b-int8/resolve/main",
-];
+const CANARY_DOWNLOAD_BASES: &[&str] =
+    &["https://huggingface.co/csukuangfj/sherpa-onnx-nemo-canary-qwen2.5-0.5b-int8/resolve/main"];
 
 fn model_specs_for(model_id: &str) -> &'static [ModelFileSpec] {
     match model_id {
@@ -914,6 +1074,22 @@ fn model_dir_for(app: &AppHandle, model_id: &str) -> Result<std::path::PathBuf, 
         .app_data_dir()
         .map(|p| p.join("models").join(model_id))
         .map_err(|e| e.to_string())
+}
+
+async fn model_file_matches_spec(path: &Path, spec: &ModelFileSpec) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < spec.expected_bytes {
+        return false;
+    }
+    match spec.sha256 {
+        Some(expected_sha256) => match compute_sha256_hex(path).await {
+            Ok(actual_sha256) => actual_sha256.eq_ignore_ascii_case(expected_sha256),
+            Err(_) => false,
+        },
+        None => true,
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1010,32 +1186,22 @@ async fn download_model(
         // Any leftover .tmp from a previous interrupted download is silently replaced.
         let tmp = dir.join(format!("{}.tmp", name));
 
-        // Skip if already fully downloaded (size within 5% of expected, or tokens.txt any size)
-        if dest.exists() {
+        // Skip if already fully downloaded and hash-verified.
+        if model_file_matches_spec(&dest, spec).await {
             if let Ok(meta) = std::fs::metadata(&dest) {
-                let size_ok = name == "tokens.txt"
-                    || meta.len() >= (expected_size as f64 * 0.95) as u64;
-                let hash_ok = match spec.sha256 {
-                    Some(expected_sha256) => {
-                        match compute_sha256_hex(&dest).await {
-                            Ok(actual_sha256) => actual_sha256.eq_ignore_ascii_case(expected_sha256),
-                            Err(_) => false,
-                        }
-                    }
-                    None => true,
-                };
-                if size_ok && hash_ok {
-                    let _ = app.emit("model-download-progress", DownloadProgress {
+                let _ = app.emit(
+                    "model-download-progress",
+                    DownloadProgress {
                         file: name.to_string(),
                         file_index: idx,
                         file_total: total_files,
                         file_bytes: meta.len(),
                         file_size: expected_size,
                         overall_percent: (((idx + 1) * 100) / total_files) as u8,
-                    });
-                    continue;
-                }
+                    },
+                );
             }
+            continue;
         }
 
         // Try each base URL in order; stop at the first that succeeds.
@@ -1048,9 +1214,16 @@ async fn download_model(
                 req = req.header("Authorization", format!("Bearer {}", token));
             }
             match req.send().await {
-                Err(e) => { last_err = format!("Network error: {}", e); }
-                Ok(r) if r.status().is_success() => { response = Some(r); break; }
-                Ok(r) => { last_err = format!("Server returned {} for {} ({})", r.status(), name, base); }
+                Err(e) => {
+                    last_err = format!("Network error: {}", e);
+                }
+                Ok(r) if r.status().is_success() => {
+                    response = Some(r);
+                    break;
+                }
+                Ok(r) => {
+                    last_err = format!("Server returned {} for {} ({})", r.status(), name, base);
+                }
             }
         }
         let response = response.ok_or_else(|| last_err)?;
@@ -1077,14 +1250,17 @@ async fn download_model(
                 / total_files as f64
                 * 100.0) as u8;
 
-            let _ = app.emit("model-download-progress", DownloadProgress {
-                file: name.to_string(),
-                file_index: idx,
-                file_total: total_files,
-                file_bytes: downloaded,
-                file_size: content_length,
-                overall_percent: overall,
-            });
+            let _ = app.emit(
+                "model-download-progress",
+                DownloadProgress {
+                    file: name.to_string(),
+                    file_index: idx,
+                    file_total: total_files,
+                    file_bytes: downloaded,
+                    file_size: content_length,
+                    overall_percent: overall,
+                },
+            );
         }
 
         file.flush().await.map_err(|e| e.to_string())?;
@@ -1128,7 +1304,9 @@ async fn run_health_check(
     let worker_exists = worker.exists();
     let model_id = state.active_model_id.lock().unwrap().clone();
     let model_dir = model_dir_for(&app, &model_id).unwrap_or_default();
-    let model_exists = model_specs_for(&model_id).iter().all(|spec| model_dir.join(spec.name).exists());
+    let model_exists = model_specs_for(&model_id)
+        .iter()
+        .all(|spec| model_dir.join(spec.name).exists());
     Ok(HealthStatus {
         worker_path: worker.to_string_lossy().into_owned(),
         worker_exists,
@@ -1211,13 +1389,13 @@ struct AudioInputInfo {
 }
 
 #[tauri::command]
-async fn get_audio_input_info(state: tauri::State<'_, SharedState>) -> Result<AudioInputInfo, String> {
+async fn get_audio_input_info(
+    state: tauri::State<'_, SharedState>,
+) -> Result<AudioInputInfo, String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
 
-    let default_device = host
-        .default_input_device()
-        .and_then(|d| d.name().ok());
+    let default_device = host.default_input_device().and_then(|d| d.name().ok());
 
     let mut devices = Vec::new();
     if let Ok(iter) = host.input_devices() {
@@ -1242,7 +1420,9 @@ struct MicrophoneTestResult {
 }
 
 #[tauri::command]
-async fn test_microphone(state: tauri::State<'_, SharedState>) -> Result<MicrophoneTestResult, String> {
+async fn test_microphone(
+    state: tauri::State<'_, SharedState>,
+) -> Result<MicrophoneTestResult, String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
     let preferred_name = state.mic_device.lock().unwrap().clone();
@@ -1258,20 +1438,24 @@ async fn test_microphone(state: tauri::State<'_, SharedState>) -> Result<Microph
 
     let device = match device {
         Some(d) => d,
-        None => return Ok(MicrophoneTestResult {
-            ok: false,
-            message: "No input device found.".to_string(),
-        }),
+        None => {
+            return Ok(MicrophoneTestResult {
+                ok: false,
+                message: "No input device found.".to_string(),
+            })
+        }
     };
 
     let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
 
     let config = match device.default_input_config() {
         Ok(c) => c,
-        Err(e) => return Ok(MicrophoneTestResult {
-            ok: false,
-            message: format!("Cannot read config for '{}': {}", device_name, e),
-        }),
+        Err(e) => {
+            return Ok(MicrophoneTestResult {
+                ok: false,
+                message: format!("Cannot read config for '{}': {}", device_name, e),
+            })
+        }
     };
 
     let stream = device.build_input_stream(
@@ -1378,8 +1562,7 @@ fn voicebar_position_path(app: &AppHandle) -> Result<std::path::PathBuf, String>
         .path()
         .app_config_dir()
         .map_err(|e| format!("Failed to resolve app config dir: {}", e))?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create config dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
     Ok(dir.join("voicebar-position.json"))
 }
 
@@ -1414,9 +1597,42 @@ fn app_settings_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .path()
         .app_config_dir()
         .map_err(|e| format!("Failed to resolve app config dir: {}", e))?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create config dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
     Ok(dir.join("settings.json"))
+}
+
+fn transcript_history_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create app data dir: {}", e))?;
+    #[cfg(windows)]
+    {
+        Ok(dir.join("transcript-history.bin"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(dir.join("transcript-history.json"))
+    }
+}
+
+fn legacy_transcript_history_path(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    #[cfg(windows)]
+    {
+        let dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to create app data dir: {}", e))?;
+        Ok(Some(dir.join("transcript-history.json")))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Ok(None)
+    }
 }
 
 fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> {
@@ -1440,11 +1656,11 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         ai_ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
         profile_hotkeys: state.profile_hotkeys.lock().unwrap().clone(),
         ai_target_language: state.ai_target_language.lock().unwrap().clone(),
+        typing_baseline_wpm: *state.typing_baseline_wpm.lock().unwrap(),
     };
     let payload = serde_json::to_string(&settings)
         .map_err(|e| format!("Failed to serialize app settings: {}", e))?;
-    std::fs::write(file, payload)
-        .map_err(|e| format!("Failed to save app settings: {}", e))
+    std::fs::write(file, payload).map_err(|e| format!("Failed to save app settings: {}", e))
 }
 
 fn load_app_settings(app: &AppHandle, state: SharedState) {
@@ -1487,7 +1703,8 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     if let Err(ref e) = anthropic_entry {
         eprintln!("[keyring] Failed to init Anthropic entry: {}", e);
     }
-    *state.anthropic_api_key.lock().unwrap() = load_ai_secret(app, "anthropic_api_key", anthropic_entry);
+    *state.anthropic_api_key.lock().unwrap() =
+        load_ai_secret(app, "anthropic_api_key", anthropic_entry);
     if keyring_token.is_none() {
         if let Some(legacy) = settings.hf_token.as_deref() {
             if !legacy.trim().is_empty() {
@@ -1500,18 +1717,26 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     state
         .onboarding_completed
         .store(settings.onboarding_completed, Ordering::SeqCst);
-    state.completion_sound.store(settings.completion_sound, Ordering::SeqCst);
+    state
+        .completion_sound
+        .store(settings.completion_sound, Ordering::SeqCst);
     *state.ai_default_mode.lock().unwrap() = settings.ai_default_mode;
     *state.ai_backend.lock().unwrap() = settings.ai_backend;
     *state.ai_model.lock().unwrap() = settings.ai_model;
     *state.ai_ollama_url.lock().unwrap() = settings.ai_ollama_url;
     *state.profile_hotkeys.lock().unwrap() = settings.profile_hotkeys;
+    *state.typing_baseline_wpm.lock().unwrap() =
+        history::validate_typing_baseline_wpm(settings.typing_baseline_wpm)
+            .unwrap_or(history::DEFAULT_TYPING_BASELINE_WPM);
     {
         let provider = state.onnx_provider.lock().unwrap().clone();
         let mut rt = state.provider_runtime.lock().unwrap();
         rt.requested = provider.clone();
         rt.effective = "unknown".to_string();
-        rt.message = format!("Configured provider is '{}'. Start recording to verify runtime backend.", provider);
+        rt.message = format!(
+            "Configured provider is '{}'. Start recording to verify runtime backend.",
+            provider
+        );
     }
 }
 
@@ -1541,114 +1766,8 @@ fn ai_secret_file_path(app: &AppHandle, key: &str) -> Result<std::path::PathBuf,
         .app_config_dir()
         .map_err(|e| format!("Failed to resolve app config dir: {}", e))?
         .join("secrets");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create secrets dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create secrets dir: {}", e))?;
     Ok(dir.join(format!("{key}.bin")))
-}
-
-#[cfg(windows)]
-fn protect_local_secret(plain: &[u8]) -> Result<Vec<u8>, String> {
-    if plain.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut input = CRYPT_INTEGER_BLOB {
-        cbData: plain.len() as u32,
-        pbData: plain.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
-    };
-    let ok = unsafe {
-        CryptProtectData(
-            &mut input,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output,
-        )
-    };
-    if ok == 0 {
-        return Err(format!(
-            "Failed to encrypt local secret: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let bytes =
-        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
-    unsafe {
-        LocalFree(output.pbData.cast());
-    }
-    Ok(bytes)
-}
-
-#[cfg(windows)]
-fn unprotect_local_secret(cipher: &[u8]) -> Result<Vec<u8>, String> {
-    if cipher.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut input = CRYPT_INTEGER_BLOB {
-        cbData: cipher.len() as u32,
-        pbData: cipher.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
-    };
-    let ok = unsafe {
-        CryptUnprotectData(
-            &mut input,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output,
-        )
-    };
-    if ok == 0 {
-        return Err(format!(
-            "Failed to decrypt local secret: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let bytes =
-        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
-    unsafe {
-        LocalFree(output.pbData.cast());
-    }
-    Ok(bytes)
-}
-
-#[cfg(windows)]
-fn save_local_encrypted_secret(path: &Path, value: Option<&str>) -> Result<(), String> {
-    match value {
-        Some(secret) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create secret directory: {}", e))?;
-            }
-            let payload = protect_local_secret(secret.as_bytes())?;
-            std::fs::write(path, payload)
-                .map_err(|e| format!("Failed to write encrypted secret: {}", e))
-        }
-        None => match std::fs::remove_file(path) {
-            Ok(_) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("Failed to delete encrypted secret: {}", e)),
-        },
-    }
-}
-
-#[cfg(windows)]
-fn load_local_encrypted_secret(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let plain = unprotect_local_secret(&bytes).ok()?;
-    let secret = String::from_utf8(plain).ok()?;
-    let trimmed = secret.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
 fn load_secret(entry: Result<keyring::Entry, String>) -> Option<String> {
@@ -1656,7 +1775,11 @@ fn load_secret(entry: Result<keyring::Entry, String>) -> Option<String> {
     match entry.get_password() {
         Ok(value) => {
             let trimmed = value.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         }
         Err(_) => None,
     }
@@ -1685,7 +1808,7 @@ fn save_ai_secret(
     #[cfg(windows)]
     {
         let path = ai_secret_file_path(app, key)?;
-        save_local_encrypted_secret(&path, value)?;
+        protected_store::save_encrypted_string(&path, value)?;
         let _ = save_secret(entry, None);
         Ok(())
     }
@@ -1705,12 +1828,12 @@ fn load_ai_secret(
     #[cfg(windows)]
     {
         let path = ai_secret_file_path(app, key).ok()?;
-        if let Some(secret) = load_local_encrypted_secret(&path) {
+        if let Some(secret) = protected_store::load_encrypted_string(&path) {
             return Some(secret);
         }
         let legacy = load_secret(entry);
         if let Some(ref value) = legacy {
-            let _ = save_local_encrypted_secret(&path, Some(value));
+            let _ = protected_store::save_encrypted_string(&path, Some(value));
             let _ = save_secret(
                 match key {
                     "openai_api_key" => openai_keyring_entry(),
@@ -1748,17 +1871,24 @@ fn mask_token(token: &str) -> String {
 async fn compute_sha256_hex(path: &Path) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
 
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| format!("Could not open file for hashing ({}): {}", path.display(), e))?;
+    let mut file = tokio::fs::File::open(path).await.map_err(|e| {
+        format!(
+            "Could not open file for hashing ({}): {}",
+            path.display(),
+            e
+        )
+    })?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1024 * 1024];
 
     loop {
-        let bytes = file
-            .read(&mut buffer)
-            .await
-            .map_err(|e| format!("Could not read file for hashing ({}): {}", path.display(), e))?;
+        let bytes = file.read(&mut buffer).await.map_err(|e| {
+            format!(
+                "Could not read file for hashing ({}): {}",
+                path.display(),
+                e
+            )
+        })?;
         if bytes == 0 {
             break;
         }
@@ -1835,18 +1965,16 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
             let _ = win.emit("navigate-to-page", p);
         }
     } else {
-        let _ = tauri::WebviewWindowBuilder::new(
-            app,
-            "settings",
-            tauri::WebviewUrl::App(url.into()),
-        )
-        .title("Settings")
-        .inner_size(640.0, 560.0)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .center()
-        .build();
+        let _ =
+            tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App(url.into()))
+                .title("VoiceNote")
+                .inner_size(820.0, 620.0)
+                .min_inner_size(760.0, 540.0)
+                .resizable(true)
+                .decorations(false)
+                .transparent(true)
+                .center()
+                .build();
     }
 }
 
@@ -1858,26 +1986,27 @@ fn open_empty_state_page(app: &AppHandle, tab: Option<&str>) {
         let _ = win.set_focus();
         let _ = win.emit("navigate-empty-tab", tab);
     } else {
-        let _ = tauri::WebviewWindowBuilder::new(
-            app,
-            "empty",
-            tauri::WebviewUrl::App(url.into()),
-        )
-        .title("Empty State")
-        .inner_size(520.0, 360.0)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .center()
-        .build();
+        let _ = tauri::WebviewWindowBuilder::new(app, "empty", tauri::WebviewUrl::App(url.into()))
+            .title("Empty State")
+            .inner_size(520.0, 360.0)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .center()
+            .build();
     }
 }
 
 #[tauri::command]
 async fn open_settings_page_command(app: AppHandle, page: Option<String>) -> Result<(), String> {
     const VALID_PAGES: &[&str] = &[
-        "general", "shortcuts", "microphone", "model",
-        "appearance", "diagnostics", "about",
+        "general",
+        "shortcuts",
+        "microphone",
+        "model",
+        "appearance",
+        "diagnostics",
+        "about",
     ];
     if let Some(ref p) = page {
         if !VALID_PAGES.contains(&p.as_str()) {
@@ -1922,7 +2051,9 @@ fn start_audio_capture(
 
         let preferred_name = state.mic_device.lock().unwrap().clone();
         let preferred_device = preferred_name.as_ref().and_then(|name| {
-            host.input_devices().ok()?.find(|d| d.name().ok().as_ref() == Some(name))
+            host.input_devices()
+                .ok()?
+                .find(|d| d.name().ok().as_ref() == Some(name))
         });
 
         let device = match preferred_device.or_else(|| host.default_input_device()) {
@@ -1986,14 +2117,11 @@ fn start_audio_capture(
                 }
 
                 // Downmix multichannel to mono by averaging channels
-                let mono_iter = data.chunks(channels_for_callback).map(|frame| {
-                    frame.iter().sum::<f32>() / channels_for_callback as f32
-                });
+                let mono_iter = data
+                    .chunks(channels_for_callback)
+                    .map(|frame| frame.iter().sum::<f32>() / channels_for_callback as f32);
 
-                buffer_for_callback
-                    .lock()
-                    .unwrap()
-                    .extend(mono_iter);
+                buffer_for_callback.lock().unwrap().extend(mono_iter);
 
                 // Emit a lightweight mic level (RMS) for waveform reactivity.
                 let mut sum_sq = 0.0f32;
@@ -2133,6 +2261,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     };
 
     if samples.is_empty() {
+        *state.pending_transcript_meta.lock().unwrap() = None;
         app.emit(
             "transcription-error",
             serde_json::json!({"message": "No audio recorded — try holding the key longer."}),
@@ -2159,12 +2288,25 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     let too_short = duration_sec < 0.20;
     let too_quiet = rms < 0.008;
     if too_short || too_quiet {
-        let reason = if too_short { "No speech detected (too short)." } else { "No speech detected." };
-        app.emit("transcription-error", serde_json::json!({"message": reason})).ok();
+        *state.pending_transcript_meta.lock().unwrap() = None;
+        let reason = if too_short {
+            "No speech detected (too short)."
+        } else {
+            "No speech detected."
+        };
+        app.emit(
+            "transcription-error",
+            serde_json::json!({"message": reason}),
+        )
+        .ok();
         state.sidecar_busy.store(false, Ordering::SeqCst);
         hide_voicebar(&app);
         return;
     }
+
+    *state.pending_transcript_meta.lock().unwrap() = Some(PendingTranscriptMeta {
+        duration_seconds: duration_sec as f64,
+    });
 
     // Tell the frontend to show "Transcribing…" only after speech presence checks pass.
     app.emit("recording-stopped", ()).ok();
@@ -2172,6 +2314,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     // 5. Save to a temp WAV file
     let wav_path = std::env::temp_dir().join(format!("voicenote_{}.wav", now_millis()));
     if let Err(e) = save_wav(&samples_16khz, &wav_path) {
+        *state.pending_transcript_meta.lock().unwrap() = None;
         app.emit(
             "transcription-error",
             serde_json::json!({"message": format!("Failed to save audio: {}", e)}),
@@ -2197,6 +2340,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     match stdin_guard.as_mut() {
         Some(stdin) => {
             if let Err(e) = writeln!(stdin, "{}", wav_path.display()) {
+                *state.pending_transcript_meta.lock().unwrap() = None;
                 app.emit(
                     "transcription-error",
                     serde_json::json!({"message": format!("STT engine not responding: {}", e)}),
@@ -2204,15 +2348,19 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
                 .ok();
                 hide_voicebar(&app);
                 state.sidecar_busy.store(false, Ordering::SeqCst);
+                return;
             }
             state.sidecar_busy.store(true, Ordering::SeqCst);
-            state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
+            state
+                .sidecar_last_used_ms
+                .store(now_millis(), Ordering::SeqCst);
             state.sidecar_standby.store(false, Ordering::SeqCst);
             *state.last_wav_path.lock().unwrap() = Some(wav_path.clone());
             // Transcript will arrive as a "transcript-ready" event from the
             // background stdout-reader thread (see spawn_sidecar below)
         }
         None => {
+            *state.pending_transcript_meta.lock().unwrap() = None;
             app.emit(
                 "transcription-error",
                 serde_json::json!({"message": "STT engine is not running. Is voicenote-worker.exe built? Run: cargo build -p voicenote-worker"}),
@@ -2302,7 +2450,10 @@ fn worker_binary_path() -> std::path::PathBuf {
 
 fn finish_transcript_request(state: &SharedState) {
     state.sidecar_busy.store(false, Ordering::SeqCst);
-    state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
+    state
+        .sidecar_last_used_ms
+        .store(now_millis(), Ordering::SeqCst);
+    *state.pending_transcript_meta.lock().unwrap() = None;
     if let Some(path) = state.last_wav_path.lock().unwrap().take() {
         let _ = std::fs::remove_file(&path);
     }
@@ -2310,7 +2461,8 @@ fn finish_transcript_request(state: &SharedState) {
 
 fn spawn_sidecar(app: AppHandle, state: SharedState) {
     // Atomically claim the spawn slot. If another thread already claimed it, bail.
-    if state.sidecar_spawning
+    if state
+        .sidecar_spawning
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
@@ -2378,7 +2530,9 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
     let stdin = child.stdin.take().unwrap();
     *state.sidecar_stdin.lock().unwrap() = Some(stdin);
     state.sidecar_spawning.store(false, Ordering::SeqCst);
-    state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
+    state
+        .sidecar_last_used_ms
+        .store(now_millis(), Ordering::SeqCst);
     state.sidecar_standby.store(false, Ordering::SeqCst);
 
     // ── Stdout reader thread ──
@@ -2413,9 +2567,8 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
 
                     // Hide the bar on error
                     hide_voicebar(&app_stdout);
-                    state_for_stdout
-                        .sidecar_busy
-                        .store(false, Ordering::SeqCst);
+                    *state_for_stdout.pending_transcript_meta.lock().unwrap() = None;
+                    state_for_stdout.sidecar_busy.store(false, Ordering::SeqCst);
                     state_for_stdout
                         .sidecar_last_used_ms
                         .store(now_millis(), Ordering::SeqCst);
@@ -2427,13 +2580,18 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     let msg = text.strip_prefix("STATUS:").unwrap_or("").to_string();
                     println!("[worker] {}", msg);
                     // Forward to VoiceBar so it can show the current worker state
-                    let _ = app_stdout.emit("sidecar-status", serde_json::json!({ "message": msg }));
+                    let _ =
+                        app_stdout.emit("sidecar-status", serde_json::json!({ "message": msg }));
                     state_for_stdout
                         .sidecar_last_used_ms
                         .store(now_millis(), Ordering::SeqCst);
                 }
                 Ok(text) if text.starts_with("TRANSCRIPT:") => {
-                    let transcript = text.strip_prefix("TRANSCRIPT:").unwrap_or("").trim().to_string();
+                    let transcript = text
+                        .strip_prefix("TRANSCRIPT:")
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if transcript.is_empty() {
                         let _ = app_stdout.emit(
                             "transcription-error",
@@ -2450,20 +2608,12 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     let active_profile = state_for_stdout.active_profile.lock().unwrap().take();
                     let default_mode = state_for_stdout.ai_default_mode.lock().unwrap().clone();
 
-                    // Resolve the effective system prompt:
-                    // 1. Profile hotkey takes priority.
-                    // 2. Otherwise, fall back to the configured default mode.
-                    let effective_prompt: Option<&'static str> = if let Some(ref pid) = active_profile {
-                        PROFILES.iter().find(|p| p.id == pid).map(|p| p.system_prompt)
-                    } else {
-                        match default_mode.as_str() {
-                            "clean" => Some("Fix grammar and punctuation. Preserve meaning and tone. Return only the corrected text, no explanation."),
-                            "translate" => Some("Translate to English. Return only the translation, no explanation or preamble."),
-                            "clean_translate" => Some("Fix grammar and punctuation, then translate to English. Return only the final corrected and translated text."),
-                            _ => None, // "raw" — no AI processing
-                        }
-                    };
+                    // Resolve the effective prompt and saved history mode from the same source:
+                    // profile hotkey first, then the current default mode.
+                    let (effective_prompt, requested_ai_mode) =
+                        resolve_ai_prompt_and_mode(active_profile.as_deref(), &default_mode);
 
+                    let mut applied_ai_mode = None;
                     let final_text = if let Some(prompt) = effective_prompt {
                         // Notify the UI that we are applying AI
                         let _ = app_stdout.emit(
@@ -2477,10 +2627,25 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                         // Read from the encrypted in-memory store (loaded at startup via DPAPI
                         // on Windows, OS keyring on other platforms). Never re-read from disk here.
                         let api_key = match backend.as_str() {
-                            "openai"    => state_for_stdout.openai_api_key.lock().unwrap().clone().unwrap_or_default(),
-                            "gemini"    => state_for_stdout.gemini_api_key.lock().unwrap().clone().unwrap_or_default(),
-                            "anthropic" => state_for_stdout.anthropic_api_key.lock().unwrap().clone().unwrap_or_default(),
-                            _           => String::new(), // Ollama needs no API key
+                            "openai" => state_for_stdout
+                                .openai_api_key
+                                .lock()
+                                .unwrap()
+                                .clone()
+                                .unwrap_or_default(),
+                            "gemini" => state_for_stdout
+                                .gemini_api_key
+                                .lock()
+                                .unwrap()
+                                .clone()
+                                .unwrap_or_default(),
+                            "anthropic" => state_for_stdout
+                                .anthropic_api_key
+                                .lock()
+                                .unwrap()
+                                .clone()
+                                .unwrap_or_default(),
+                            _ => String::new(), // Ollama needs no API key
                         };
 
                         match tauri::async_runtime::block_on(apply_ai_with_prompt(
@@ -2492,7 +2657,10 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                             &api_key,
                             &ollama_url,
                         )) {
-                            Ok(processed) => processed,
+                            Ok(processed) => {
+                                applied_ai_mode = requested_ai_mode;
+                                processed
+                            }
                             Err(e) => {
                                 eprintln!("AI post-processing failed: {}", e);
                                 let _ = app_stdout.emit(
@@ -2510,6 +2678,46 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     // Auto-paste the result into the previously active app
                     if !final_text.trim().is_empty() {
                         paste_text(&final_text);
+                    }
+
+                    let pending_meta = {
+                        state_for_stdout
+                            .pending_transcript_meta
+                            .lock()
+                            .unwrap()
+                            .take()
+                    };
+                    if let Some(meta) = pending_meta {
+                        let word_count = history::count_words(&final_text);
+                        let record = history::TranscriptRecord {
+                            id: format!("tr_{}", now_millis()),
+                            created_at: iso_timestamp_now(),
+                            text: final_text.clone(),
+                            raw_text: transcript.clone(),
+                            duration_seconds: meta.duration_seconds,
+                            word_count,
+                            wpm: history::calculate_wpm(word_count, meta.duration_seconds),
+                            ai_mode: applied_ai_mode,
+                        };
+                        match transcript_history_path(&app_stdout) {
+                            Ok(path) => {
+                                let _history_guard =
+                                    state_for_stdout.history_write_lock.lock().unwrap();
+                                if let Err(err) = history::append_history_record(
+                                    &path,
+                                    legacy_transcript_history_path(&app_stdout)
+                                        .ok()
+                                        .flatten()
+                                        .as_deref(),
+                                    record,
+                                ) {
+                                    eprintln!("Failed to save transcript history: {}", err);
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!("Failed to resolve transcript history path: {}", err);
+                            }
+                        }
                     }
 
                     // Notify the Voice Bar UI
@@ -2609,7 +2817,6 @@ async fn apply_ai_with_prompt(
     api_key: &str,
     ollama_url: &str,
 ) -> Result<String, String> {
-
     match backend {
         "openai" => {
             let body = serde_json::json!({
@@ -2746,8 +2953,8 @@ fn paste_text(text: &str) {
 
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let settings_item = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
-    let separator     = tauri::menu::PredefinedMenuItem::separator(app)?;
-    let quit_item     = MenuItemBuilder::with_id("quit", "Quit VoiceNote").build(app)?;
+    let separator = tauri::menu::PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit VoiceNote").build(app)?;
 
     let menu = MenuBuilder::new(app)
         .item(&settings_item)
@@ -2763,8 +2970,8 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .tooltip("VoiceNote — Press Right Ctrl to record")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "settings" => open_settings(app),
-            "quit"     => app.exit(0),
-            _          => {}
+            "quit" => app.exit(0),
+            _ => {}
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { .. } = event {
@@ -2787,24 +2994,33 @@ fn register_hotkey(app: &AppHandle, state: SharedState, hotkey: &str) -> Result<
         return register_right_ctrl_native(app, state, hotkey);
     }
 
-    let app_on_press   = app.clone();
+    let app_on_press = app.clone();
     let app_on_release = app.clone();
-    let state_press    = state.clone();
-    let state_release  = state.clone();
+    let state_press = state.clone();
+    let state_release = state.clone();
     let hotkey_for_callback = hotkey.to_string();
     let hotkey_for_register = hotkey.to_string();
 
     app.global_shortcut()
-        .on_shortcut(hotkey_for_register.as_str(), move |_app, _shortcut, event| {
-            match event.state() {
+        .on_shortcut(
+            hotkey_for_register.as_str(),
+            move |_app, _shortcut, event| match event.state() {
                 ShortcutState::Pressed => {
-                    handle_shortcut_pressed(app_on_press.clone(), state_press.clone(), hotkey_for_callback.clone());
+                    handle_shortcut_pressed(
+                        app_on_press.clone(),
+                        state_press.clone(),
+                        hotkey_for_callback.clone(),
+                    );
                 }
                 ShortcutState::Released => {
-                    handle_shortcut_released(app_on_release.clone(), state_release.clone(), hotkey_for_callback.clone());
+                    handle_shortcut_released(
+                        app_on_release.clone(),
+                        state_release.clone(),
+                        hotkey_for_callback.clone(),
+                    );
                 }
-            }
-        })
+            },
+        )
         .map_err(|e| format!("Failed to register shortcut '{}': {}", hotkey, e))?;
 
     Ok(())
@@ -2853,6 +3069,7 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
 
     state.recording.store(true, Ordering::SeqCst);
     state.audio_buffer.lock().unwrap().clear();
+    *state.pending_transcript_meta.lock().unwrap() = None;
 
     // Detect if the pressed hotkey maps to an AI profile
     {
@@ -2906,7 +3123,9 @@ fn handle_shortcut_released(app: AppHandle, state: SharedState, shortcut: String
     }
 
     state.sidecar_busy.store(true, Ordering::SeqCst);
-    state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
+    state
+        .sidecar_last_used_ms
+        .store(now_millis(), Ordering::SeqCst);
 
     tauri::async_runtime::spawn(async move {
         finalize_recording(app, state).await;
@@ -2914,7 +3133,11 @@ fn handle_shortcut_released(app: AppHandle, state: SharedState, shortcut: String
 }
 
 #[cfg(target_os = "windows")]
-fn register_right_ctrl_native(app: &AppHandle, state: SharedState, hotkey: &str) -> Result<(), String> {
+fn register_right_ctrl_native(
+    app: &AppHandle,
+    state: SharedState,
+    hotkey: &str,
+) -> Result<(), String> {
     state.right_ctrl_stop.store(false, Ordering::SeqCst);
     state.right_ctrl_active.store(true, Ordering::SeqCst);
 
@@ -2930,23 +3153,35 @@ fn register_right_ctrl_native(app: &AppHandle, state: SharedState, hotkey: &str)
             }
             // SAFETY: GetAsyncKeyState is a pure Win32 query function and does not require
             // additional invariants for this usage.
-            let pressed = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(VK_RCONTROL_CODE) } < 0;
+            let pressed = unsafe {
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(VK_RCONTROL_CODE)
+            } < 0;
             if pressed && !was_pressed {
                 handle_shortcut_pressed(app_on_key.clone(), state_on_key.clone(), shortcut.clone());
             } else if !pressed && was_pressed {
-                handle_shortcut_released(app_on_key.clone(), state_on_key.clone(), shortcut.clone());
+                handle_shortcut_released(
+                    app_on_key.clone(),
+                    state_on_key.clone(),
+                    shortcut.clone(),
+                );
             }
             was_pressed = pressed;
             std::thread::sleep(std::time::Duration::from_millis(12));
         }
-        state_on_key.right_ctrl_active.store(false, Ordering::SeqCst);
+        state_on_key
+            .right_ctrl_active
+            .store(false, Ordering::SeqCst);
     });
 
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn register_right_ctrl_native(_app: &AppHandle, _state: SharedState, _hotkey: &str) -> Result<(), String> {
+fn register_right_ctrl_native(
+    _app: &AppHandle,
+    _state: SharedState,
+    _hotkey: &str,
+) -> Result<(), String> {
     Err("ControlRight-only shortcut is only supported on Windows in this build".to_string())
 }
 
@@ -2957,8 +3192,12 @@ fn setup_hotkey(app: &AppHandle, state: SharedState) -> Result<(), String> {
         Err(e) => {
             eprintln!("Hotkey '{}' failed to register: {}", hotkey, e);
             *state.shortcut.lock().unwrap() = DEFAULT_SHORTCUT.to_string();
-            register_hotkey(app, state, DEFAULT_SHORTCUT)
-                .map_err(|e2| format!("Failed to register fallback shortcut '{}': {}", DEFAULT_SHORTCUT, e2))
+            register_hotkey(app, state, DEFAULT_SHORTCUT).map_err(|e2| {
+                format!(
+                    "Failed to register fallback shortcut '{}': {}",
+                    DEFAULT_SHORTCUT, e2
+                )
+            })
         }
     }
 }
@@ -2978,6 +3217,10 @@ pub fn run() {
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             stop_recording,
+            get_transcript_history,
+            get_dashboard_stats,
+            get_productivity_settings,
+            set_typing_baseline_wpm,
             cancel_recording,
             check_for_updates,
             get_shortcut,
@@ -3076,9 +3319,10 @@ pub fn run() {
                             "settings",
                             tauri::WebviewUrl::App("/?window=settings".into()),
                         )
-                        .title("Settings")
-                        .inner_size(640.0, 560.0)
-                        .resizable(false)
+                        .title("VoiceNote")
+                        .inner_size(820.0, 620.0)
+                        .min_inner_size(760.0, 540.0)
+                        .resizable(true)
                         .decorations(false)
                         .transparent(true)
                         .position(-32000.0, -32000.0)
@@ -3161,7 +3405,7 @@ pub fn run() {
 #[cfg(test)]
 mod ai_settings_tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::ai::AiProvider;
 
     #[test]
     fn default_ai_preset_is_raw() {
@@ -3191,22 +3435,90 @@ mod ai_settings_tests {
     }
 
     #[test]
-    #[cfg(windows)]
-    fn local_ai_secret_round_trips_and_deletes() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let base = std::env::temp_dir().join(format!("voicenote-secret-test-{unique}"));
-        let path = base.join("openai_api_key.bin");
+    fn timestamp_helpers_format_unix_seconds_as_utc_iso() {
+        assert_eq!(unix_seconds_to_iso(0), "1970-01-01T00:00:00Z");
+        assert_eq!(unix_seconds_to_iso(1_778_932_800), "2026-05-16T12:00:00Z");
+    }
 
-        save_local_encrypted_secret(&path, Some("sk-test-secret")).unwrap();
+    #[test]
+    fn app_state_initializes_history_defaults() {
+        let state = AppState::new();
+
         assert_eq!(
-            load_local_encrypted_secret(&path).as_deref(),
-            Some("sk-test-secret")
+            *state.typing_baseline_wpm.lock().unwrap(),
+            history::DEFAULT_TYPING_BASELINE_WPM
         );
+        assert!(state.pending_transcript_meta.lock().unwrap().is_none());
+    }
 
-        save_local_encrypted_secret(&path, None).unwrap();
-        assert_eq!(load_local_encrypted_secret(&path), None);
+    #[test]
+    fn ai_history_mode_matches_prompt_resolution() {
+        let (prompt, mode) = resolve_ai_prompt_and_mode(Some("summarize"), "raw");
+        assert!(prompt.is_some());
+        assert_eq!(mode.as_deref(), Some("summarize"));
+
+        let (prompt, mode) = resolve_ai_prompt_and_mode(None, "clean");
+        assert!(prompt.is_some());
+        assert_eq!(mode.as_deref(), Some("clean"));
+
+        let (prompt, mode) = resolve_ai_prompt_and_mode(None, "raw");
+        assert!(prompt.is_none());
+        assert!(mode.is_none());
+
+        let (prompt, mode) = resolve_ai_prompt_and_mode(Some("missing-profile"), "clean");
+        assert!(prompt.is_none());
+        assert!(mode.is_none());
+    }
+
+    #[test]
+    fn model_specs_define_sha256_for_every_file() {
+        for spec in PARAKEET_FILES.iter().chain(CANARY_FILES.iter()) {
+            assert!(
+                spec.sha256.is_some(),
+                "missing sha256 for model file {}",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn model_file_matches_spec_accepts_matching_hash() {
+        let unique = crate::now_millis();
+        let dir = std::env::temp_dir().join(format!("voicenote-model-hash-ok-{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tokens.txt");
+        let content = b"voice note tokens";
+        std::fs::write(&path, content).unwrap();
+        let expected_hash = format!("{:x}", Sha256::digest(content));
+        let spec = ModelFileSpec {
+            name: "tokens.txt",
+            expected_bytes: content.len() as u64,
+            sha256: Some(Box::leak(expected_hash.into_boxed_str())),
+        };
+
+        let matches = tauri::async_runtime::block_on(model_file_matches_spec(&path, &spec));
+
+        assert!(matches);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn model_file_matches_spec_rejects_wrong_hash_even_with_matching_size() {
+        let unique = crate::now_millis();
+        let dir = std::env::temp_dir().join(format!("voicenote-model-hash-bad-{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tokens.txt");
+        let content = b"voice note tokens";
+        std::fs::write(&path, content).unwrap();
+        let spec = ModelFileSpec {
+            name: "tokens.txt",
+            expected_bytes: content.len() as u64,
+            sha256: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        };
+
+        let matches = tauri::async_runtime::block_on(model_file_matches_spec(&path, &spec));
+
+        assert!(!matches);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
