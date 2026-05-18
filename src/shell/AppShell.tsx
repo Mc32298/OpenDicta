@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { usePrefs, type Prefs } from "./prefs";
+import { ModelManagerContext, useModelManagerState } from "../hooks/useModelManager";
 import {
   DashboardIcon,
   InsightsIcon,
@@ -56,6 +57,7 @@ function getInitialPage(): PageId {
 export default function AppShell() {
   const [prefs, setPrefs] = usePrefs();
   const [page, setPage] = useState<PageId>(getInitialPage);
+  const modelManager = useModelManagerState();
 
   useEffect(() => {
     const root = document.documentElement;
@@ -83,6 +85,7 @@ export default function AppShell() {
   const current = NAV.find((n) => n.id === page) ?? NAV[0];
 
   return (
+    <ModelManagerContext.Provider value={modelManager}>
     <div className="stage">
       <div className="win">
         <div className="titlebar">
@@ -129,6 +132,7 @@ export default function AppShell() {
         </div>
       </div>
     </div>
+    </ModelManagerContext.Provider>
   );
 }
 

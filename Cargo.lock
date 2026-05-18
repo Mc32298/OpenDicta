@@ -4798,6 +4798,7 @@ version = "0.1.0"
 dependencies = [
  "hound",
  "sherpa-onnx",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

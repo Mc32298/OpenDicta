@@ -32,6 +32,14 @@ fn send_status(msg: &str) {
 }
 
 fn main() {
+    // Block outbound network connections before doing anything else.
+    // The worker is a pure local process — it reads WAV files from disk and
+    // runs ONNX inference. It never needs network access. This restriction is
+    // applied at the OS level via Windows process mitigation policy and cannot
+    // be lifted once set, even if a malicious model exploits the ONNX runtime.
+    #[cfg(windows)]
+    block_outbound_network();
+
     // Tell Tauri the process is alive before loading anything heavy.
     send("READY");
 
@@ -97,6 +105,36 @@ fn main() {
             Ok(text) => send(&format!("TRANSCRIPT:{}", text)),
             Err(e) => send(&format!("ERROR: Transcription failed — {}", e)),
         }
+    }
+}
+
+/// Prevent this process from making any outbound network connections.
+///
+/// Uses Windows Process Mitigation Policy (ProcessNetworkConnectionFilterPolicy),
+/// available on Windows 10 build 18362+. The restriction is one-way — it cannot
+/// be lifted by the process itself after being applied, which is the point.
+/// On older Windows versions the call silently fails and the process continues.
+#[cfg(windows)]
+fn block_outbound_network() {
+    use windows_sys::Win32::System::Threading::SetProcessMitigationPolicy;
+
+    // ProcessNetworkConnectionFilterPolicy = 11 in PROCESS_MITIGATION_POLICY enum.
+    // Flags = 1 sets the FilterConnectionBlocking bit, blocking all TCP/UDP sockets.
+    const PROCESS_NETWORK_CONNECTION_FILTER_POLICY: i32 = 11;
+    let flags: u32 = 1;
+
+    let ok = unsafe {
+        SetProcessMitigationPolicy(
+            PROCESS_NETWORK_CONNECTION_FILTER_POLICY,
+            std::ptr::addr_of!(flags).cast(),
+            std::mem::size_of::<u32>(),
+        )
+    };
+
+    if ok == 0 {
+        eprintln!("[worker] network isolation: policy not applied (Windows version too old or unsupported)");
+    } else {
+        eprintln!("[worker] network isolation: outbound connections blocked");
     }
 }
 

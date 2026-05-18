@@ -604,6 +604,34 @@ fn get_dashboard_stats(
 }
 
 #[tauri::command]
+fn get_insights_stats(
+    app: AppHandle,
+) -> Result<history::InsightsStats, String> {
+    let path = transcript_history_path(&app)?;
+    let records =
+        history::load_history_file(&path, legacy_transcript_history_path(&app)?.as_deref())?;
+    let now_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(history::calculate_insights_stats(&records, now_unix_seconds))
+}
+
+#[tauri::command]
+fn get_latest_transcript_data(
+    app: AppHandle,
+) -> Result<history::DashboardLatestData, String> {
+    let path = transcript_history_path(&app)?;
+    let records =
+        history::load_history_file(&path, legacy_transcript_history_path(&app)?.as_deref())?;
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(history::build_dashboard_latest(&records, now_unix))
+}
+
+#[tauri::command]
 fn get_productivity_settings(
     state: tauri::State<'_, SharedState>,
 ) -> Result<history::ProductivitySettings, String> {
@@ -856,7 +884,15 @@ async fn set_active_model_id(
     state: tauri::State<'_, SharedState>,
     model_id: String,
 ) -> Result<(), String> {
-    let valid = ["parakeet", "canary_qwen_2_5b"];
+    let valid = [
+        "parakeet",
+        "canary_qwen_2_5b",
+        "whisper_small",
+        "whisper_medium",
+        "whisper_large",
+        "whisper_large_v3_turbo",
+        "qwen3_asr",
+    ];
     if !valid.contains(&model_id.as_str()) {
         return Err(format!("Unknown model id: {}", model_id));
     }
@@ -1186,9 +1222,134 @@ const CANARY_FILES: &[ModelFileSpec] = &[
 const CANARY_DOWNLOAD_BASES: &[&str] =
     &["https://huggingface.co/csukuangfj/sherpa-onnx-nemo-canary-qwen2.5-0.5b-int8/resolve/main"];
 
+/// Whisper Small INT8 — compact, fast English model (~374 MB total)
+const WHISPER_SMALL_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec {
+        name: "small-encoder.int8.onnx",
+        expected_bytes: 110_000_000,
+        sha256: Some("4cbe7b22fa9026b843b60a68640c747de05bafb1a11b57edc0e66c232d9f33a9"),
+    },
+    ModelFileSpec {
+        name: "small-decoder.int8.onnx",
+        expected_bytes: 260_000_000,
+        sha256: Some("acad50b5c782696e91b55914cc5ab4f756f1532f76e22aa6fc615f39fb69a8ee"),
+    },
+    ModelFileSpec {
+        name: "small-tokens.txt",
+        expected_bytes: 800_000,
+        sha256: None,
+    },
+];
+const WHISPER_SMALL_DOWNLOAD_BASES: &[&str] =
+    &["https://huggingface.co/csukuangfj/sherpa-onnx-whisper-small/resolve/main"];
+
+/// Whisper Medium INT8 — balanced speed/accuracy (~945 MB total)
+const WHISPER_MEDIUM_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec {
+        name: "medium-encoder.int8.onnx",
+        expected_bytes: 370_000_000,
+        sha256: Some("1c54582b4d829de0089f6cb63bbbdb3bf7555398bacaf855fbecf1a84dfd193e"),
+    },
+    ModelFileSpec {
+        name: "medium-decoder.int8.onnx",
+        expected_bytes: 565_000_000,
+        sha256: Some("595d00a338a365a7bfa0ca7f296cabc639583bef770ab6130df90f49a6412747"),
+    },
+    ModelFileSpec {
+        name: "medium-tokens.txt",
+        expected_bytes: 800_000,
+        sha256: None,
+    },
+];
+const WHISPER_MEDIUM_DOWNLOAD_BASES: &[&str] =
+    &["https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main"];
+
+/// Whisper Large v2 INT8 — high-accuracy (~1.8 GB total)
+const WHISPER_LARGE_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec {
+        name: "large-v2-encoder.int8.onnx",
+        expected_bytes: 760_000_000,
+        sha256: Some("f055f8397a69895818c1763fd001e47fb9ca51ea7efaccfafc1b635d121203a3"),
+    },
+    ModelFileSpec {
+        name: "large-v2-decoder.int8.onnx",
+        expected_bytes: 1_000_000_000,
+        sha256: Some("ea513c5bfcbdc422b025da8fc93065ab8706994ba90053af442145b9aa7c2ee8"),
+    },
+    ModelFileSpec {
+        name: "large-v2-tokens.txt",
+        expected_bytes: 800_000,
+        sha256: None,
+    },
+];
+const WHISPER_LARGE_DOWNLOAD_BASES: &[&str] =
+    &["https://huggingface.co/csukuangfj/sherpa-onnx-whisper-large-v2/resolve/main"];
+
+/// Whisper Large v3 Turbo INT8 — maximum accuracy, faster than large (~1.0 GB total)
+const WHISPER_TURBO_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec {
+        name: "turbo-encoder.int8.onnx",
+        expected_bytes: 670_000_000,
+        sha256: Some("b02dcdf54f348741e93fe732b67d933c8dcb6735655f710640143081db38878b"),
+    },
+    ModelFileSpec {
+        name: "turbo-decoder.int8.onnx",
+        expected_bytes: 355_000_000,
+        sha256: Some("20accd02388482eb3a46bd615631adfdc85e1eb2c7db9ea3f02a40ffe6b81547"),
+    },
+    ModelFileSpec {
+        name: "turbo-tokens.txt",
+        expected_bytes: 800_000,
+        sha256: None,
+    },
+];
+const WHISPER_TURBO_DOWNLOAD_BASES: &[&str] =
+    &["https://huggingface.co/csukuangfj/sherpa-onnx-whisper-turbo/resolve/main"];
+
+/// Qwen3-ASR 0.6B INT8 — encoder-decoder with conv frontend (~982 MB total)
+const QWEN3_ASR_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec {
+        name: "conv_frontend.onnx",
+        expected_bytes: 43_000_000,
+        sha256: Some("d22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e"),
+    },
+    ModelFileSpec {
+        name: "encoder.int8.onnx",
+        expected_bytes: 180_000_000,
+        sha256: Some("60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9"),
+    },
+    ModelFileSpec {
+        name: "decoder.int8.onnx",
+        expected_bytes: 750_000_000,
+        sha256: Some("4f6885be5959ae26af3089d38ee7972c5fafbeeb1cf8d5e76eab6d8b61ca5771"),
+    },
+    ModelFileSpec {
+        name: "tokenizer/merges.txt",
+        expected_bytes: 1_600_000,
+        sha256: None,
+    },
+    ModelFileSpec {
+        name: "tokenizer/tokenizer_config.json",
+        expected_bytes: 10_000,
+        sha256: None,
+    },
+    ModelFileSpec {
+        name: "tokenizer/vocab.json",
+        expected_bytes: 2_700_000,
+        sha256: None,
+    },
+];
+const QWEN3_ASR_DOWNLOAD_BASES: &[&str] =
+    &["https://huggingface.co/csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/resolve/main"];
+
 fn model_specs_for(model_id: &str) -> &'static [ModelFileSpec] {
     match model_id {
         "canary_qwen_2_5b" => CANARY_FILES,
+        "whisper_small" => WHISPER_SMALL_FILES,
+        "whisper_medium" => WHISPER_MEDIUM_FILES,
+        "whisper_large" => WHISPER_LARGE_FILES,
+        "whisper_large_v3_turbo" => WHISPER_TURBO_FILES,
+        "qwen3_asr" => QWEN3_ASR_FILES,
         _ => PARAKEET_FILES,
     }
 }
@@ -1196,6 +1357,11 @@ fn model_specs_for(model_id: &str) -> &'static [ModelFileSpec] {
 fn download_bases_for(model_id: &str) -> &'static [&'static str] {
     match model_id {
         "canary_qwen_2_5b" => CANARY_DOWNLOAD_BASES,
+        "whisper_small" => WHISPER_SMALL_DOWNLOAD_BASES,
+        "whisper_medium" => WHISPER_MEDIUM_DOWNLOAD_BASES,
+        "whisper_large" => WHISPER_LARGE_DOWNLOAD_BASES,
+        "whisper_large_v3_turbo" => WHISPER_TURBO_DOWNLOAD_BASES,
+        "qwen3_asr" => QWEN3_ASR_DOWNLOAD_BASES,
         _ => PARAKEET_DOWNLOAD_BASES,
     }
 }
@@ -1245,9 +1411,8 @@ struct ModelStatus {
 #[tauri::command]
 async fn get_model_status(
     app: AppHandle,
-    state: tauri::State<'_, SharedState>,
+    model_id: String,
 ) -> Result<ModelStatus, String> {
-    let model_id = state.active_model_id.lock().unwrap().clone();
     let dir = model_dir_for(&app, &model_id)?;
     let mut files = Vec::new();
     let mut all_present = true;
@@ -1280,6 +1445,7 @@ async fn get_model_status(
 
 #[derive(serde::Serialize, Clone)]
 struct DownloadProgress {
+    model_id: String,
     file: String,
     file_index: usize,
     file_total: usize,
@@ -1292,10 +1458,10 @@ struct DownloadProgress {
 async fn download_model(
     app: AppHandle,
     state: tauri::State<'_, SharedState>,
+    model_id: String,
 ) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
-    let model_id = state.active_model_id.lock().unwrap().clone();
     let dir = model_dir_for(&app, &model_id)?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create model directory: {}", e))?;
@@ -1327,6 +1493,7 @@ async fn download_model(
                 let _ = app.emit(
                     "model-download-progress",
                     DownloadProgress {
+                        model_id: model_id.clone(),
                         file: name.to_string(),
                         file_index: idx,
                         file_total: total_files,
@@ -1365,6 +1532,12 @@ async fn download_model(
 
         let content_length = response.content_length().unwrap_or(expected_size);
 
+        // Ensure any subdirectory (e.g. tokenizer/) exists before writing.
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Could not create directory for {}: {}", name, e))?;
+        }
+
         // Write to .tmp first — prevents a partial file being mistaken for a
         // complete one if the process is killed mid-download.
         let mut file = tokio::fs::File::create(&tmp)
@@ -1388,6 +1561,7 @@ async fn download_model(
             let _ = app.emit(
                 "model-download-progress",
                 DownloadProgress {
+                    model_id: model_id.clone(),
                     file: name.to_string(),
                     file_index: idx,
                     file_total: total_files,
@@ -1420,6 +1594,16 @@ async fn download_model(
 
     let _ = app.emit("model-download-complete", ());
     Ok(())
+}
+
+#[tauri::command]
+async fn delete_model(app: AppHandle, model_id: String) -> Result<(), String> {
+    let dir = model_dir_for(&app, &model_id)?;
+    if !dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&dir)
+        .map_err(|e| format!("Could not delete model files: {}", e))
 }
 
 #[derive(serde::Serialize)]
@@ -3578,6 +3762,8 @@ pub fn run() {
             stop_recording,
             get_transcript_history,
             get_dashboard_stats,
+            get_insights_stats,
+            get_latest_transcript_data,
             get_productivity_settings,
             set_typing_baseline_wpm,
             cancel_recording,
@@ -3611,6 +3797,7 @@ pub fn run() {
             run_health_check,
             get_model_status,
             download_model,
+            delete_model,
             get_onnx_provider,
             get_provider_runtime_status,
             set_onnx_provider,

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -32,10 +33,74 @@ pub struct DashboardStats {
     pub weekly_words: u32,
     pub weekly_goal_words: u32,
     pub weekly_progress: f64,
+    // Extended fields
+    pub today_words: u32,
+    pub yesterday_words: u32,
+    pub current_streak_days: u32,
+    pub typing_baseline_wpm: u32,
+    /// Last 7 days word counts, index 0 = 6 days ago, index 6 = today.
+    pub last_7_day_words: Vec<u32>,
+    /// 28-day activity grid, index 0 = 27 days ago, index 27 = today.
+    pub heatmap_28: Vec<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyWordCount {
+    pub label: String,
+    pub words: u32,
+    pub goal: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InsightsStats {
+    pub week_label: String,
+    pub weekly_words: u32,
+    pub weekly_speaking_seconds: f64,
+    pub weekly_days_active: u32,
+    pub weekly_goal_words: u32,
+    pub weekly_goal_speaking_seconds: f64,
+    pub words_pct: u32,
+    pub speaking_pct: u32,
+    pub milestones_pct: u32,
+    pub overall_pct: u32,
+    pub daily_words: Vec<DailyWordCount>,
+    pub daily_avg_words: u32,
+    pub pb_longest_session_seconds: f64,
+    pub pb_longest_session_label: String,
+    pub pb_fastest_wpm: f64,
+    pub pb_fastest_wpm_label: String,
+    pub pb_best_streak_days: u32,
+    pub pb_streak_label: String,
+    pub pb_most_words_day: u32,
+    pub pb_most_words_day_label: String,
 }
 
 pub const DEFAULT_TYPING_BASELINE_WPM: u32 = 40;
 pub const WEEKLY_GOAL_WORDS: u32 = 5_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatestTranscriptInfo {
+    pub id: String,
+    pub title: String,
+    pub time_ago: String,
+    pub duration_label: String,
+    pub word_count: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentSession {
+    pub id: String,
+    pub title: String,
+    pub time_ago: String,
+    pub word_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardLatestData {
+    pub latest: Option<LatestTranscriptInfo>,
+    pub recent_sessions: Vec<RecentSession>,
+}
 
 pub fn count_words(text: &str) -> u32 {
     text.split_whitespace()
@@ -154,6 +219,37 @@ pub fn calculate_dashboard_stats(
         .sum();
     let weekly_progress = (weekly_words as f64 / WEEKLY_GOAL_WORDS as f64).clamp(0.0, 1.0);
 
+    // Per-day totals (reused for today, yesterday, heatmap, mini-bars, streak)
+    let mut day_totals: HashMap<u64, u32> = HashMap::new();
+    for r in records {
+        if let Some(ts) = unix_seconds_from_iso(&r.created_at) {
+            *day_totals.entry(ts / 86_400).or_insert(0) += r.word_count;
+        }
+    }
+
+    let today_day = now_unix_seconds / 86_400;
+    let today_words = day_totals.get(&today_day).copied().unwrap_or(0);
+    let yesterday_words = day_totals
+        .get(&today_day.saturating_sub(1))
+        .copied()
+        .unwrap_or(0);
+
+    let last_7_day_words: Vec<u32> = (0..7u64)
+        .map(|i| {
+            let day = today_day.saturating_sub(6 - i);
+            day_totals.get(&day).copied().unwrap_or(0)
+        })
+        .collect();
+
+    let heatmap_28: Vec<bool> = (0..28u64)
+        .map(|i| {
+            let day = today_day.saturating_sub(27 - i);
+            day_totals.contains_key(&day)
+        })
+        .collect();
+
+    let current_streak_days = compute_current_streak(&day_totals, now_unix_seconds);
+
     DashboardStats {
         avg_wpm,
         total_words,
@@ -162,7 +258,323 @@ pub fn calculate_dashboard_stats(
         weekly_words,
         weekly_goal_words: WEEKLY_GOAL_WORDS,
         weekly_progress,
+        today_words,
+        yesterday_words,
+        current_streak_days,
+        typing_baseline_wpm: settings.typing_baseline_wpm,
+        last_7_day_words,
+        heatmap_28,
     }
+}
+
+fn compute_current_streak(day_totals: &HashMap<u64, u32>, now_unix: u64) -> u32 {
+    let today = now_unix / 86_400;
+    // If the user hasn't recorded yet today, count from yesterday so the streak
+    // doesn't appear broken during the day.
+    let start = if day_totals.contains_key(&today) {
+        today
+    } else {
+        today.saturating_sub(1)
+    };
+    if !day_totals.contains_key(&start) {
+        return 0;
+    }
+    let mut streak = 0u32;
+    let mut day = start;
+    loop {
+        if day_totals.contains_key(&day) {
+            streak += 1;
+            if day == 0 {
+                break;
+            }
+            day -= 1;
+        } else {
+            break;
+        }
+    }
+    streak
+}
+
+pub fn calculate_insights_stats(
+    records: &[TranscriptRecord],
+    now_unix_seconds: u64,
+) -> InsightsStats {
+    let week_start = start_of_week_unix(now_unix_seconds);
+    let daily_goal = WEEKLY_GOAL_WORDS / 7;
+
+    let mut day_words = [0u32; 7];
+    let mut day_active = [false; 7];
+
+    for r in records {
+        let Some(ts) = unix_seconds_from_iso(&r.created_at) else { continue };
+        if ts < week_start || ts > now_unix_seconds { continue }
+        let day_idx = ((ts - week_start) / 86_400) as usize;
+        if day_idx < 7 {
+            day_words[day_idx] += r.word_count;
+            day_active[day_idx] = true;
+        }
+    }
+
+    let weekly_words: u32 = day_words.iter().sum();
+    let weekly_days_active = day_active.iter().filter(|&&a| a).count() as u32;
+
+    let weekly_speaking_seconds: f64 = records
+        .iter()
+        .filter(|r| {
+            unix_seconds_from_iso(&r.created_at)
+                .map(|ts| ts >= week_start && ts <= now_unix_seconds)
+                .unwrap_or(false)
+        })
+        .map(|r| r.duration_seconds.max(0.0))
+        .sum();
+
+    let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let daily_words_vec: Vec<DailyWordCount> = (0..7)
+        .map(|i| DailyWordCount {
+            label: day_names[i].to_string(),
+            words: day_words[i],
+            goal: daily_goal,
+        })
+        .collect();
+
+    let words_pct = ((weekly_words as f64 / WEEKLY_GOAL_WORDS as f64) * 100.0)
+        .clamp(0.0, 100.0) as u32;
+    let speaking_pct = ((weekly_speaking_seconds / 28_800.0) * 100.0)
+        .clamp(0.0, 100.0) as u32;
+    let milestones_pct = ((weekly_days_active as f64 / 7.0) * 100.0)
+        .clamp(0.0, 100.0) as u32;
+    let overall_pct = (words_pct + speaking_pct + milestones_pct) / 3;
+
+    let pb_longest = records
+        .iter()
+        .filter(|r| r.duration_seconds > 0.0)
+        .max_by(|a, b| {
+            a.duration_seconds
+                .partial_cmp(&b.duration_seconds)
+                .unwrap_or(Ordering::Equal)
+        });
+
+    let pb_fastest = records
+        .iter()
+        .filter(|r| r.wpm > 0.0)
+        .max_by(|a, b| a.wpm.partial_cmp(&b.wpm).unwrap_or(Ordering::Equal));
+
+    let (pb_most_words_day, pb_most_words_day_label) = compute_most_words_day(records);
+    let (pb_best_streak_days, pb_streak_label) = compute_best_streak(records, now_unix_seconds);
+
+    InsightsStats {
+        week_label: format_week_label(week_start),
+        weekly_words,
+        weekly_speaking_seconds,
+        weekly_days_active,
+        weekly_goal_words: WEEKLY_GOAL_WORDS,
+        weekly_goal_speaking_seconds: 28_800.0,
+        words_pct,
+        speaking_pct,
+        milestones_pct,
+        overall_pct,
+        daily_words: daily_words_vec,
+        daily_avg_words: weekly_words / 7,
+        pb_longest_session_seconds: pb_longest.map_or(0.0, |r| r.duration_seconds),
+        pb_longest_session_label: pb_longest
+            .map(|r| format_record_label(&r.created_at, now_unix_seconds))
+            .unwrap_or_default(),
+        pb_fastest_wpm: pb_fastest.map_or(0.0, |r| r.wpm),
+        pb_fastest_wpm_label: pb_fastest
+            .map(|r| format_record_label(&r.created_at, now_unix_seconds))
+            .unwrap_or_default(),
+        pb_best_streak_days,
+        pb_streak_label,
+        pb_most_words_day,
+        pb_most_words_day_label,
+    }
+}
+
+/// Converts days-since-Unix-epoch back to (year, month, day).
+/// Inverse of `days_from_civil` using Howard Hinnant's algorithm.
+fn civil_from_days(days: u64) -> (i32, u32, u32) {
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i32 + (era * 400) as i32;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+fn format_day_label(day_since_epoch: u64) -> String {
+    let (_, month, day) = civil_from_days(day_since_epoch);
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month_name = MONTHS
+        .get(month.saturating_sub(1) as usize)
+        .copied()
+        .unwrap_or("?");
+    format!("{} {}", month_name, day)
+}
+
+fn format_week_label(week_start_unix: u64) -> String {
+    format_day_label(week_start_unix / 86_400)
+}
+
+fn format_record_label(iso: &str, now_unix: u64) -> String {
+    let Some(ts) = unix_seconds_from_iso(iso) else {
+        return String::new();
+    };
+    let record_day = ts / 86_400;
+    let now_day = now_unix / 86_400;
+    let weekday_idx = ((record_day + 3) % 7) as usize;
+    const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let weekday = WEEKDAYS[weekday_idx];
+    if record_day == now_day {
+        format!("{} · Today", weekday)
+    } else if record_day == now_day.saturating_sub(1) {
+        format!("{} · Yesterday", weekday)
+    } else {
+        format!("{} · {}", weekday, format_day_label(record_day))
+    }
+}
+
+fn compute_most_words_day(records: &[TranscriptRecord]) -> (u32, String) {
+    let mut day_totals: HashMap<u64, u32> = HashMap::new();
+    for r in records {
+        let Some(ts) = unix_seconds_from_iso(&r.created_at) else { continue };
+        *day_totals.entry(ts / 86_400).or_insert(0) += r.word_count;
+    }
+    match day_totals.iter().max_by_key(|(_, &v)| v) {
+        Some((&day, &count)) => (count, format_day_label(day)),
+        None => (0, String::new()),
+    }
+}
+
+fn compute_best_streak(records: &[TranscriptRecord], now_unix: u64) -> (u32, String) {
+    let mut days: Vec<u64> = records
+        .iter()
+        .filter_map(|r| unix_seconds_from_iso(&r.created_at).map(|ts| ts / 86_400))
+        .collect();
+    days.sort_unstable();
+    days.dedup();
+
+    if days.is_empty() {
+        return (0, String::new());
+    }
+
+    let mut best_len = 1u32;
+    let mut best_end_day = days[0];
+    let mut cur_len = 1u32;
+
+    for i in 1..days.len() {
+        if days[i] == days[i - 1] + 1 {
+            cur_len += 1;
+            if cur_len > best_len {
+                best_len = cur_len;
+                best_end_day = days[i];
+            }
+        } else {
+            cur_len = 1;
+        }
+    }
+
+    let today = now_unix / 86_400;
+    let label = if best_end_day >= today.saturating_sub(1) {
+        "Active streak".to_string()
+    } else {
+        format!("Ended {}", format_day_label(best_end_day))
+    };
+
+    (best_len, label)
+}
+
+fn time_ago(created_at: &str, now_unix: u64) -> String {
+    let ts = unix_seconds_from_iso(created_at).unwrap_or(0);
+    let diff = now_unix.saturating_sub(ts);
+    if diff < 60 {
+        "Just now".to_string()
+    } else if diff < 3600 {
+        let m = diff / 60;
+        format!("{} minute{} ago", m, if m == 1 { "" } else { "s" })
+    } else if diff < 86400 {
+        let h = diff / 3600;
+        format!("{} hour{} ago", h, if h == 1 { "" } else { "s" })
+    } else if diff < 172800 {
+        "Yesterday".to_string()
+    } else {
+        let d = diff / 86400;
+        format!("{} days ago", d)
+    }
+}
+
+fn fmt_duration(secs: f64) -> String {
+    let total = secs as u64;
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+fn derive_title(text: &str) -> String {
+    let t = text.trim();
+    // Use text up to first sentence-ending punctuation or newline, capped at 72 chars
+    let end = t
+        .find(['.', '!', '?', '\n'])
+        .unwrap_or(t.len())
+        .min(72);
+    let candidate = t[..end].trim();
+    if candidate.is_empty() {
+        // Fall back to first 60 chars of raw text
+        let cap = t.len().min(60);
+        let s = &t[..cap];
+        return if cap < t.len() {
+            if let Some(p) = s.rfind(' ') {
+                format!("{}…", &t[..p])
+            } else {
+                format!("{}…", s)
+            }
+        } else {
+            s.to_string()
+        };
+    }
+    if candidate.len() <= 72 {
+        candidate.to_string()
+    } else {
+        let s = &candidate[..69];
+        if let Some(p) = s.rfind(' ') {
+            format!("{}…", &candidate[..p])
+        } else {
+            format!("{}…", s)
+        }
+    }
+}
+
+pub fn build_dashboard_latest(
+    records: &[TranscriptRecord],
+    now_unix: u64,
+) -> DashboardLatestData {
+    // Records are stored newest-first after load_history_file sorts them
+    let latest = records.first().map(|r| LatestTranscriptInfo {
+        id: r.id.clone(),
+        title: derive_title(&r.text),
+        time_ago: time_ago(&r.created_at, now_unix),
+        duration_label: fmt_duration(r.duration_seconds),
+        word_count: r.word_count,
+        text: r.text.clone(),
+    });
+
+    let recent_sessions = records
+        .iter()
+        .take(5)
+        .map(|r| RecentSession {
+            id: r.id.clone(),
+            title: derive_title(&r.text),
+            time_ago: time_ago(&r.created_at, now_unix),
+            word_count: r.word_count,
+        })
+        .collect();
+
+    DashboardLatestData { latest, recent_sessions }
 }
 
 pub fn validate_typing_baseline_wpm(value: u32) -> Result<u32, String> {

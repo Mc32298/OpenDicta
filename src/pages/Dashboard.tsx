@@ -1,8 +1,59 @@
-import { useMemo, type ReactNode } from "react";
+import { useState, useEffect, useMemo, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import PageHead from "./PageHead";
 import {
   SearchIcon, MicIcon, CopyIcon, PlayIcon, EditIcon, MailIcon, SparkleIcon,
 } from "../ui/icons";
+
+interface DashboardStats {
+  avg_wpm: number;
+  total_words: number;
+  total_speaking_seconds: number;
+  minutes_saved: number;
+  weekly_words: number;
+  weekly_goal_words: number;
+  weekly_progress: number;
+  today_words: number;
+  yesterday_words: number;
+  current_streak_days: number;
+  typing_baseline_wpm: number;
+  last_7_day_words: number[];
+  heatmap_28: boolean[];
+}
+
+interface LatestTranscriptInfo {
+  id: string;
+  title: string;
+  time_ago: string;
+  duration_label: string;
+  word_count: number;
+  text: string;
+}
+
+interface RecentSession {
+  id: string;
+  title: string;
+  time_ago: string;
+  word_count: number;
+}
+
+interface DashboardLatestData {
+  latest: LatestTranscriptInfo | null;
+  recent_sessions: RecentSession[];
+}
+
+function todayTrend(today: number, yesterday: number): string {
+  if (yesterday === 0) return today > 0 ? "First recording today" : "No recordings yet today";
+  const pct = Math.round(((today - yesterday) / yesterday) * 100);
+  return pct >= 0 ? `+${pct}% vs yesterday` : `${pct}% vs yesterday`;
+}
+
+function fmtHours(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  if (h === 0) return m + "m";
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
 
 export default function Dashboard({ userName }: { userName: string; accent?: string }) {
   const hour = new Date().getHours();
@@ -10,6 +61,21 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
     hour < 5 ? "Up late" :
     hour < 12 ? "Good morning" :
     hour < 18 ? "Good afternoon" : "Good evening";
+
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [latest, setLatest] = useState<DashboardLatestData | null>(null);
+
+  useEffect(() => {
+    invoke<DashboardStats>("get_dashboard_stats").then(setStats).catch(console.error);
+    invoke<DashboardLatestData>("get_latest_transcript_data").then(setLatest).catch(console.error);
+  }, []);
+
+  const miniBarsData = useMemo(() => {
+    if (!stats) return [0.3, 0.5, 0.4, 0.7, 0.6, 0.85, 0.95];
+    const vals = stats.last_7_day_words;
+    const max = Math.max(...vals, 1);
+    return vals.map(v => v / max);
+  }, [stats]);
 
   return (
     <div className="page">
@@ -30,26 +96,26 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
       <div className="grid grid-3" style={{ marginBottom: 18 }}>
         <StatCard
           label="Today's words"
-          value="2,847"
+          value={stats ? stats.today_words.toLocaleString() : "—"}
           unit="words"
-          trend="+18% vs yesterday"
+          trend={stats ? todayTrend(stats.today_words, stats.yesterday_words) : "Loading…"}
           accent
-          inset={<MiniBars data={[0.3, 0.5, 0.4, 0.7, 0.6, 0.85, 0.95]} />}
+          inset={<MiniBars data={miniBarsData} />}
         />
         <StatCard
           label="Average WPM"
-          value="148"
+          value={stats ? Math.round(stats.avg_wpm).toString() : "—"}
           unit="wpm"
-          trend="Up from 132 last week"
+          trend="Overall all-time average"
           inset={<MiniLine />}
         />
         <StatCard
           label="Hours saved"
-          value="42.6"
-          unit="this month"
-          trend="vs typing at 38 wpm"
+          value={stats ? fmtHours(stats.minutes_saved) : "—"}
+          unit="saved"
+          trend={stats ? `vs typing at ${stats.typing_baseline_wpm} wpm` : "Loading…"}
           dark
-          inset={<HoursPie pct={0.71} />}
+          inset={<HoursPie pct={stats?.weekly_progress ?? 0.71} />}
         />
       </div>
 
@@ -59,8 +125,14 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
             <div>
               <div style={{ fontSize: 11, fontWeight: 500, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--ink-3)" }}>Latest transcript</div>
-              <div style={{ fontSize: 20, fontWeight: 600, marginTop: 6, color: "var(--ink-1)" }}>Q3 planning kickoff notes</div>
-              <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginTop: 4 }}>14 minutes ago · 04:32 duration · 612 words · Whisper Pro</div>
+              <div style={{ fontSize: 20, fontWeight: 600, marginTop: 6, color: "var(--ink-1)" }}>
+                {latest?.latest?.title ?? "No recordings yet"}
+              </div>
+              <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginTop: 4 }}>
+                {latest?.latest
+                  ? `${latest.latest.time_ago} · ${latest.latest.duration_label} duration · ${latest.latest.word_count.toLocaleString()} words`
+                  : "Make your first recording to get started"}
+              </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn btn-sm btn-ghost"><CopyIcon style={{ width: 14, height: 14 }} /> Copy</button>
@@ -76,12 +148,9 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
             background: "var(--bg-sunken)", borderRadius: 16,
             border: "0.5px solid var(--line)",
           }}>
-            <span style={{ background: "color-mix(in oklch, var(--accent) 50%, transparent)", padding: "0 2px", borderRadius: 3 }}>Okay so for Q3</span>, the three big bets we landed on are
-            shipping the new transcript editor, cutting model latency below 300ms,
-            and finally tackling the team-sharing flow that's been on the backlog
-            since spring. I think if we sequence those right — editor first because
-            it unblocks design, then latency since infra is already half-done…
-            <span style={{ color: "var(--ink-3)" }}> and the rest is a separate conversation about resourcing.</span>
+            {latest?.latest
+              ? latest.latest.text.slice(0, 500) + (latest.latest.text.length > 500 ? "…" : "")
+              : <span style={{ color: "var(--ink-3)" }}>Your transcript will appear here after your first recording.</span>}
           </div>
 
           <div style={{ marginTop: "auto", paddingTop: 18, display: "flex", gap: 10 }}>
@@ -97,42 +166,37 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
           <div className="card">
             <h3>Recording streak</h3>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 2 }}>
-              <div className="stat-num" style={{ fontSize: 36 }}>23</div>
+              <div className="stat-num" style={{ fontSize: 36 }}>
+                {stats?.current_streak_days ?? 23}
+              </div>
               <span className="stat-unit">days</span>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(14, 1fr)", gap: 4, marginTop: 14 }}>
-              {Array.from({ length: 28 }).map((_, i) => {
-                const active = i < 23 || (i >= 24 && i < 27);
-                return (
-                  <div key={i} style={{
-                    aspectRatio: "1", borderRadius: 4,
-                    background: active ? "var(--accent)" : "var(--bg-sunken)",
-                    border: "0.5px solid var(--line)",
-                  }} />
-                );
-              })}
+              {(stats?.heatmap_28 ?? Array.from({ length: 28 }, (_, i) => i < 23 || (i >= 24 && i < 27))).map((active, i) => (
+                <div key={i} style={{
+                  aspectRatio: "1", borderRadius: 4,
+                  background: active ? "var(--accent)" : "var(--bg-sunken)",
+                  border: "0.5px solid var(--line)",
+                }} />
+              ))}
             </div>
           </div>
 
           <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
             <h3>Recent sessions</h3>
             <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 8, flex: 1 }}>
-              {[
-                { t: "Q3 planning kickoff notes", d: "14m ago", w: 612 },
-                { t: "Customer call — Acme Co.", d: "2h ago", w: 1840 },
-                { t: "Morning journal", d: "8h ago", w: 294 },
-                { t: "Voice memo to self", d: "Yesterday", w: 127 },
-                { t: "Standup recap", d: "Yesterday", w: 438 },
-              ].map((s, i) => (
-                <div key={i} style={{
+              {(latest?.recent_sessions ?? []).length === 0
+                ? <div style={{ fontSize: 13, color: "var(--ink-3)", padding: "10px 4px" }}>No sessions yet</div>
+                : (latest?.recent_sessions ?? []).map((s, i, arr) => (
+                <div key={s.id} style={{
                   display: "flex", justifyContent: "space-between", alignItems: "center",
-                  padding: "10px 4px", borderBottom: i < 4 ? "0.5px solid var(--line)" : "none",
+                  padding: "10px 4px", borderBottom: i < arr.length - 1 ? "0.5px solid var(--line)" : "none",
                 }}>
                   <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink-1)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.t}</div>
-                    <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>{s.d}</div>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: "var(--ink-1)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.title}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>{s.time_ago}</div>
                   </div>
-                  <div className="mono tnum" style={{ fontSize: 12, color: "var(--ink-3)" }}>{s.w}w</div>
+                  <div className="mono tnum" style={{ fontSize: 12, color: "var(--ink-3)" }}>{s.word_count}w</div>
                 </div>
               ))}
             </div>
@@ -201,6 +265,7 @@ function MiniLine() {
 
 function HoursPie({ pct }: { pct: number }) {
   const r = 18, c = 2 * Math.PI * r;
+  const displayPct = Math.round(pct * 100);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <svg viewBox="0 0 50 50" style={{ width: 44, height: 44 }}>
@@ -209,7 +274,7 @@ function HoursPie({ pct }: { pct: number }) {
           strokeDasharray={`${c * pct} ${c}`} strokeLinecap="round"
           transform="rotate(-90 25 25)" />
       </svg>
-      <div style={{ fontSize: 11.5, color: "oklch(70% 0.008 85)" }}>71% to monthly goal</div>
+      <div style={{ fontSize: 11.5, color: "oklch(70% 0.008 85)" }}>{displayPct}% to weekly goal</div>
     </div>
   );
 }

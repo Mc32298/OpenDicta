@@ -1,8 +1,12 @@
 /// Load ASR model via sherpa-onnx.
 ///
 /// Model is selected by the VOICENOTE_MODEL_ID environment variable:
-///   "parakeet"        — Parakeet-TDT 0.6B v3 (INT8), NeMo Transducer (multilingual)
-///   "canary_qwen_2_5b" — Canary-Qwen-2.5B (INT8), NeMo Canary (English only)
+///   "parakeet"             — Parakeet-TDT 0.6B v3 (INT8), NeMo Transducer
+///   "canary_qwen_2_5b"     — Canary-Qwen-2.5B (INT8), NeMo Canary
+///   "whisper_small"        — Whisper Small (INT8)
+///   "whisper_medium"       — Whisper Medium (INT8)
+///   "whisper_large"        — Whisper Large v2 (INT8)
+///   "whisper_large_v3_turbo" — Whisper Large v3 Turbo (INT8)
 ///
 /// Model files are expected in the directory set by VOICENOTE_MODEL_DIR.
 ///
@@ -11,7 +15,8 @@
 use std::path::PathBuf;
 use sherpa_onnx::{
     OfflineRecognizer, OfflineRecognizerConfig,
-    OfflineTransducerModelConfig, OfflineCanaryModelConfig,
+    OfflineTransducerModelConfig, OfflineCanaryModelConfig, OfflineWhisperModelConfig,
+    OfflineQwen3ASRModelConfig,
 };
 
 pub fn load() -> Result<OfflineRecognizer, Box<dyn std::error::Error>> {
@@ -31,6 +36,10 @@ pub fn load() -> Result<OfflineRecognizer, Box<dyn std::error::Error>> {
 
     match model_id.as_str() {
         "canary_qwen_2_5b" => load_canary(&dir, &provider, num_threads),
+        id @ ("whisper_small" | "whisper_medium" | "whisper_large" | "whisper_large_v3_turbo") => {
+            load_whisper(id, &dir, &provider, num_threads)
+        }
+        "qwen3_asr" => load_qwen3_asr(&dir, &provider, num_threads),
         _ => load_parakeet(&dir, &provider, num_threads),
     }
 }
@@ -81,6 +90,81 @@ fn load_canary(
 
     OfflineRecognizer::create(&config)
         .ok_or_else(|| "sherpa-onnx failed to create Canary recognizer — check model files".into())
+}
+
+fn load_whisper(
+    model_id: &str,
+    dir: &PathBuf,
+    provider: &str,
+    num_threads: i32,
+) -> Result<OfflineRecognizer, Box<dyn std::error::Error>> {
+    let (encoder_name, decoder_name, tokens_name) = match model_id {
+        "whisper_small" => (
+            "small-encoder.int8.onnx",
+            "small-decoder.int8.onnx",
+            "small-tokens.txt",
+        ),
+        "whisper_medium" => (
+            "medium-encoder.int8.onnx",
+            "medium-decoder.int8.onnx",
+            "medium-tokens.txt",
+        ),
+        "whisper_large" => (
+            "large-v2-encoder.int8.onnx",
+            "large-v2-decoder.int8.onnx",
+            "large-v2-tokens.txt",
+        ),
+        _ => (
+            "turbo-encoder.int8.onnx",
+            "turbo-decoder.int8.onnx",
+            "turbo-tokens.txt",
+        ),
+    };
+
+    check_files(dir, &[encoder_name, decoder_name, tokens_name])?;
+
+    let mut config = OfflineRecognizerConfig::default();
+    let mut whisper = OfflineWhisperModelConfig::default();
+    whisper.encoder = Some(dir.join(encoder_name).to_string_lossy().into_owned());
+    whisper.decoder = Some(dir.join(decoder_name).to_string_lossy().into_owned());
+    whisper.language = Some("en".to_string());
+    whisper.task = Some("transcribe".to_string());
+    config.model_config.whisper = whisper;
+    config.model_config.tokens = Some(dir.join(tokens_name).to_string_lossy().into_owned());
+    config.model_config.num_threads = num_threads;
+    config.model_config.debug = false;
+    config.model_config.provider = Some(provider.to_string());
+
+    OfflineRecognizer::create(&config)
+        .ok_or_else(|| "sherpa-onnx failed to create Whisper recognizer — check model files".into())
+}
+
+fn load_qwen3_asr(
+    dir: &PathBuf,
+    provider: &str,
+    num_threads: i32,
+) -> Result<OfflineRecognizer, Box<dyn std::error::Error>> {
+    check_files(dir, &[
+        "conv_frontend.onnx",
+        "encoder.int8.onnx",
+        "decoder.int8.onnx",
+        "tokenizer/merges.txt",
+        "tokenizer/vocab.json",
+    ])?;
+
+    let mut config = OfflineRecognizerConfig::default();
+    let mut qwen3 = OfflineQwen3ASRModelConfig::default();
+    qwen3.conv_frontend = Some(dir.join("conv_frontend.onnx").to_string_lossy().into_owned());
+    qwen3.encoder = Some(dir.join("encoder.int8.onnx").to_string_lossy().into_owned());
+    qwen3.decoder = Some(dir.join("decoder.int8.onnx").to_string_lossy().into_owned());
+    qwen3.tokenizer = Some(dir.join("tokenizer").to_string_lossy().into_owned());
+    config.model_config.qwen3_asr = qwen3;
+    config.model_config.num_threads = num_threads;
+    config.model_config.debug = false;
+    config.model_config.provider = Some(provider.to_string());
+
+    OfflineRecognizer::create(&config)
+        .ok_or_else(|| "sherpa-onnx failed to create Qwen3-ASR recognizer — check model files".into())
 }
 
 fn check_files(dir: &PathBuf, required: &[&str]) -> Result<(), Box<dyn std::error::Error>> {

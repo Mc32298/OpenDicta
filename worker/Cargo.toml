@@ -21,3 +21,7 @@ sherpa-onnx = { version = "1.13", default-features = false }
 
 # WAV reading
 hound = "3.5"
+
+[target.'cfg(windows)'.dependencies]
+# Used to apply OS-level network isolation before model loading
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }
