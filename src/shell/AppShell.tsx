@@ -101,7 +101,14 @@ export default function AppShell() {
         <div className="app">
           <aside className="side">
             <div className="brand">
-              <div className="brand-mark">V</div>
+              <div className="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 32 32" role="img">
+                  <rect x="4.5" y="11" width="23" height="10" rx="5" fill="#fffdf7" stroke="#1a1a1a" strokeWidth="1.4" />
+                  <circle cx="9" cy="16" r="2.2" fill="#ff6a4d" />
+                  <rect x="13" y="13.6" width="8" height="4.8" rx="2.4" fill="#1a1a1a" />
+                  <circle cx="24" cy="16" r="2.2" fill="#1a1a1a" />
+                </svg>
+              </div>
               <div className="brand-text">OpenDicta</div>
             </div>
             <nav className="nav">
@@ -119,11 +126,6 @@ export default function AppShell() {
                 </button>
               ))}
             </nav>
-            <div className="side-foot">
-              <div className="avatar" title={prefs.userName || "You"}>
-                {(prefs.userName || "A").charAt(0).toUpperCase()}
-              </div>
-            </div>
           </aside>
 
           <main className="main" key={page}>

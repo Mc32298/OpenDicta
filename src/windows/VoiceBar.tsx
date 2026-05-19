@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import Waveform from "../components/Waveform";
-import { AlertIcon, CheckIcon, GearIcon, MicIcon, StopIcon, XIcon } from "../ui/icons";
+import { AlertIcon, CheckIcon, GearIcon, MicIcon, XIcon } from "../ui/icons";
 import { IconButton } from "../ui/controls";
 
 type State = "idle" | "recording" | "processing" | "done" | "error" | "cancelled";
@@ -14,9 +14,7 @@ export default function VoiceBar() {
   const [statusText, setStatusText] = useState("Ready");
   const [lastError, setLastError]   = useState<string | null>(null);
   const [level, setLevel]           = useState(0);
-  const [waveColor, setWaveColor]   = useState("#D4956A");
   const [shortcut, setShortcut]     = useState("RCtrl");
-  const [elapsed, setElapsed]       = useState(0);
   const [completionSound, setCompletionSound] = useState(false);
   const [activeProfile, setActiveProfile] = useState<string | null>(null);
 
@@ -43,18 +41,11 @@ export default function VoiceBar() {
     osc.stop(ctx.currentTime + duration);
   }
 
-  // Recording elapsed timer
-  useEffect(() => {
-    if (state !== "recording") { setElapsed(0); return; }
-    const id = setInterval(() => setElapsed(e => e + 1), 1000);
-    return () => clearInterval(id);
-  }, [state]);
-
   // Resize the transparent Tauri window to match pill content width per state
   useEffect(() => {
     const widths: Record<State, number> = {
       idle:       260,
-      recording:  320,
+      recording:  210,
       processing: 290,
       done:       420,
       error:      360,
@@ -71,7 +62,6 @@ export default function VoiceBar() {
   useEffect(() => {
     // Load initial state from backend
     invoke<boolean>("get_voicebar_visible").then(setVisible).catch(console.error);
-    invoke<string>("get_waveform_color").then(setWaveColor).catch(console.error);
     invoke<string>("get_shortcut").then(setShortcut).catch(console.error);
     invoke<boolean>("get_completion_sound").then((val) => {
       setCompletionSound(val);
@@ -156,10 +146,6 @@ export default function VoiceBar() {
       setLevel(event.payload);
     });
 
-    const unlistenColor = listen<{ color: string }>("waveform-color-changed", (event) => {
-      if (event.payload?.color) setWaveColor(event.payload.color);
-    });
-
     const unlistenShow = listen("voicebar-show", () => {
       clearHideTimers();
       setVisible(true);
@@ -191,7 +177,6 @@ export default function VoiceBar() {
       unlistenError.then(fn => fn());
       unlistenAiWarning.then(fn => fn());
       unlistenLevel.then(fn => fn());
-      unlistenColor.then(fn => fn());
       unlistenWorkerStatus.then(fn => fn());
       unlistenShortcut.then(fn => fn());
       unlistenShow.then(fn => fn());
@@ -233,10 +218,6 @@ export default function VoiceBar() {
 
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
-  }
-
-  function handleStop() {
-    void invoke("stop_recording").catch(console.error);
   }
 
   function handleCancel() {
@@ -281,11 +262,6 @@ export default function VoiceBar() {
     }
   }
 
-  function fmt(s: number) {
-    const m = Math.floor(s / 60);
-    return `${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-  }
-
   const isRecording  = state === "recording";
   const isProcessing = state === "processing";
   const isDone       = state === "done";
@@ -297,18 +273,17 @@ export default function VoiceBar() {
     <div className="voicebar-wrapper">
     <div className={`pill-shell ${visible ? "" : "pill-shell--hidden"}`}>
       <div className={`pill pill--${state}`} onPointerDown={handleDragStart}>
-        <div className="pill-mic">
-          <MicIcon className="pill-mic-icon" />
-        </div>
+        {!isRecording && (
+          <div className="pill-mic">
+            <MicIcon className="pill-mic-icon" />
+          </div>
+        )}
 
         <div className="pill-body">
           {isRecording && (
-            <>
-              <div className="pill-wave">
-                <Waveform active={true} level={level} color={waveColor} />
-              </div>
-              <div className="pill-timer">{fmt(elapsed)}</div>
-            </>
+            <div className="pill-wave pill-wave--solo">
+              <Waveform active={true} level={level} color="rgba(255,255,255,0.9)" />
+            </div>
           )}
           {isProcessing && (
             <div className="pill-status">
@@ -347,17 +322,12 @@ export default function VoiceBar() {
         </div>
 
         <div className="pill-actions">
-          {isRecording && (
-            <IconButton className="pill-action" variant="primary" onClick={handleStop} label="Stop recording">
-              <StopIcon />
-            </IconButton>
-          )}
           {isError && lastError && (
             <IconButton className="pill-action" onClick={() => void openSettings()} label="Open diagnostics">
               <GearIcon />
             </IconButton>
           )}
-          {(isRecording || isProcessing || isError || isIdle) && (
+          {(isProcessing || isError || isIdle) && (
             <IconButton
               className="pill-action"
               variant={isError ? "danger" : "ghost"}

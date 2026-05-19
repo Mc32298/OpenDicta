@@ -131,9 +131,9 @@ html, body {
   background: var(--accent);
   color: var(--accent-ink);
   display: flex; align-items: center; justify-content: center;
-  font-weight: 700; font-size: 17px;
   box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.12);
 }
+.brand-mark svg { width: 24px; height: 24px; display: block; }
 [data-sidebar="wide"] .brand { justify-content: flex-start; padding-left: 4px; gap: 10px; }
 [data-sidebar="wide"] .brand-text { font-weight: 600; font-size: 15px; }
 .brand-text { display: none; }
@@ -165,16 +165,20 @@ html, body {
 [data-sidebar="wide"] .nav-label { display: inline; }
 
 .side-foot {
+  width: 100%;
   display: flex; flex-direction: column; gap: 8px;
-  align-items: center; padding-top: 8px;
+  align-items: center; justify-content: center;
+  padding: 14px 0 4px;
   border-top: 1px solid oklch(28% 0.005 60);
 }
-[data-sidebar="wide"] .side-foot { align-items: stretch; }
+[data-sidebar="wide"] .side-foot { align-items: center; }
 .avatar {
-  width: 36px; height: 36px; border-radius: 50%;
+  width: 34px; height: 34px; border-radius: 50%;
   background: linear-gradient(135deg, oklch(75% 0.08 50), oklch(60% 0.1 30));
   display: flex; align-items: center; justify-content: center;
   color: white; font-weight: 600; font-size: 13px;
+  margin-inline: auto;
+  flex: 0 0 auto;
   box-shadow: inset 0 0 0 1.5px oklch(30% 0.005 60);
 }
 
@@ -444,29 +448,34 @@ html, body {
 }
 
 /* ── VoiceBar Pill ─────────────────────────────────── */
-.pill { display:inline-flex; align-items:center; height:52px; background:rgba(255,255,255,0.96); border:1px solid var(--line); border-radius:26px; padding:0 14px 0 12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08),0 8px 24px rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,0.7); cursor:grab; }
+.pill { display:inline-flex; align-items:center; height:50px; background:linear-gradient(180deg, rgba(36,36,34,0.78), rgba(18,18,17,0.72)); border:0.5px solid rgba(255,255,255,0.18); border-radius:999px; padding:0 8px; overflow:hidden; box-shadow:0 14px 34px rgba(0,0,0,0.26),0 2px 8px rgba(0,0,0,0.16),inset 0 1px 0 rgba(255,255,255,0.14),inset 0 -1px 0 rgba(0,0,0,0.24); cursor:grab; backdrop-filter:blur(22px) saturate(1.25); -webkit-backdrop-filter:blur(22px) saturate(1.25); }
 .pill:active { cursor: grabbing; }
 .pill-shell { width:100%; height:100%; display:flex; align-items:center; justify-content:center; transition:opacity 120ms ease; }
 .pill-shell--hidden { opacity:0; pointer-events:none; }
 :root[data-vb="1"] .pill-shell { opacity:1 !important; pointer-events:auto !important; }
-.pill--recording { border-color:color-mix(in oklch, var(--accent) 60%, transparent); box-shadow:0 0 0 3px color-mix(in oklch, var(--accent) 28%, transparent),0 8px 24px rgba(0,0,0,0.10); }
-.pill--done { border-color:color-mix(in oklch, var(--ac-green) 50%, transparent); box-shadow:0 0 0 3px color-mix(in oklch, var(--ac-green) 22%, transparent),0 8px 24px rgba(0,0,0,0.10); }
-.pill--error { border-color:color-mix(in oklch, var(--ac-red) 50%, transparent); box-shadow:0 0 0 3px color-mix(in oklch, var(--ac-red) 18%, transparent),0 8px 24px rgba(0,0,0,0.10); }
-.pill--cancelled { box-shadow:0 2px 8px rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,0.7); }
-.pill-mic { width:30px; height:30px; border-radius:50%; background:var(--accent); color:var(--accent-ink); display:flex; align-items:center; justify-content:center; margin-right:10px; flex-shrink:0; }
-.pill--done .pill-mic { background:var(--ac-green); color:white; }
-.pill--error .pill-mic { background:var(--ac-red); color:white; }
-.pill-body { flex:1; display:flex; align-items:center; min-width:0; gap:10px; }
+.pill--recording { width:224px; height:58px; padding:0 14px; background:linear-gradient(180deg, rgba(18,18,18,0.74), rgba(4,4,4,0.68)); border:1px solid rgba(255,255,255,0.24); box-shadow:0 18px 44px rgba(0,0,0,0.38),0 2px 10px rgba(0,0,0,0.22),inset 0 1px 0 rgba(255,255,255,0.16),inset 0 -1px 0 rgba(0,0,0,0.34); backdrop-filter:blur(24px) saturate(1.25); -webkit-backdrop-filter:blur(24px) saturate(1.25); }
+.pill--done { border-color:rgba(255,255,255,0.22); box-shadow:0 14px 34px rgba(0,0,0,0.26),0 0 0 1px color-mix(in oklch, var(--ac-green) 16%, transparent),inset 0 1px 0 rgba(255,255,255,0.16); }
+.pill--error { border-color:rgba(255,255,255,0.22); box-shadow:0 14px 34px rgba(0,0,0,0.26),0 0 0 1px color-mix(in oklch, var(--ac-red) 16%, transparent),inset 0 1px 0 rgba(255,255,255,0.16); }
+.pill--cancelled { box-shadow:0 14px 34px rgba(0,0,0,0.24),inset 0 1px 0 rgba(255,255,255,0.14); }
+.pill-mic { width:34px; height:34px; border-radius:50%; background:rgba(255,255,255,0.12); color:rgba(255,255,255,0.88); display:flex; align-items:center; justify-content:center; margin-right:10px; flex-shrink:0; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.18); }
+.pill-mic-icon { width:18px; height:18px; }
+.pill--done .pill-mic { background:rgba(255,255,255,0.12); color:var(--ac-green); }
+.pill--error .pill-mic { background:rgba(255,255,255,0.12); color:var(--ac-red); }
+.pill-body { flex:1; display:flex; align-items:center; min-width:0; gap:9px; }
 .pill-wave { flex:1; display:flex; align-items:center; overflow:hidden; }
-.pill-timer { font-family:'Geist Mono',ui-monospace,monospace; font-size:14px; font-weight:600; min-width:38px; text-align:right; font-variant-numeric:tabular-nums; color:var(--ink-1); }
+.pill--recording .pill-body { width:100%; gap:0; }
+.pill-wave--solo { height:40px; justify-content:center; }
+.pill-wave--solo canvas { width:100% !important; height:40px !important; opacity:.96; filter:drop-shadow(0 1px 1px rgba(0,0,0,0.28)); }
+.pill-timer { font-family:'Geist Mono',ui-monospace,monospace; font-size:14px; font-weight:650; min-width:42px; text-align:right; font-variant-numeric:tabular-nums; color:rgba(255,255,255,0.92); letter-spacing:0; }
 .pill-status { flex:1; display:flex; align-items:center; gap:9px; min-width:0; }
-.pill-status-text { font-size:13px; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--ink-2); }
-.pill-status-text--muted { color:var(--ink-4); }
+.pill-status-text { font-size:13px; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:rgba(255,255,255,0.78); }
+.pill-status-text--muted { color:rgba(255,255,255,0.56); }
 .pill-status-text--done { color:var(--ac-green); font-weight:600; }
 .pill-status-text--error { color:var(--ac-red); }
 .pill-hint { display:flex; align-items:center; gap:5px; }
-.pill-hint-text { font-size:12px; color:var(--ink-4); }
-.pill-hint kbd, .wv-kbd { background:var(--bg-sunken); border:1px solid var(--line); border-radius:5px; padding:2px 6px; font-size:11px; color:var(--ink-2); font-family:'Geist Mono',ui-monospace,monospace; }
+.pill-hint-text { font-size:12px; color:rgba(255,255,255,0.52); }
+.pill-hint kbd { background:rgba(255,255,255,0.10); border:0.5px solid rgba(255,255,255,0.16); border-radius:7px; padding:2px 7px; font-size:11px; color:rgba(255,255,255,0.72); font-family:'Geist Mono',ui-monospace,monospace; box-shadow:none; }
+.wv-kbd { background:rgba(255,255,255,0.7); border:0.5px solid rgba(0,0,0,0.12); border-radius:7px; padding:2px 7px; font-size:11px; color:var(--ink-2); font-family:'Geist Mono',ui-monospace,monospace; box-shadow:inset 0 1px 0 rgba(255,255,255,0.7); }
 .pill-dots { display:flex; gap:4px; }
 .pill-dots span { width:5px; height:5px; border-radius:50%; background:var(--accent); animation:dot-wave 1.2s ease-in-out infinite; }
 .pill-dots span:nth-child(2) { animation-delay:.16s; }
@@ -477,7 +486,11 @@ html, body {
 .pill-alert { background:color-mix(in oklch, var(--ac-red) 14%, transparent); color:var(--ac-red); }
 .pill-cancelled { background:var(--bg-sunken); color:var(--ink-4); }
 .pill-actions { display:flex; align-items:center; gap:6px; margin-left:8px; }
-.pill-action { width:34px; height:34px; flex:0 0 34px; }
+.pill-action { width:32px; height:32px; flex:0 0 32px; border-radius:11px; }
+.pill .wv-icon-btn { background:rgba(255,255,255,0.10); border:0.5px solid rgba(255,255,255,0.14); color:rgba(255,255,255,0.86); box-shadow:inset 0 1px 0 rgba(255,255,255,0.12); transition:background .14s ease, transform .14s ease, border-color .14s ease; }
+.pill .wv-icon-btn:hover { background:rgba(255,255,255,0.16); transform:translateY(-0.5px); border-color:rgba(255,255,255,0.22); }
+.pill .wv-icon-btn--primary { background:rgba(255,255,255,0.88); border-color:rgba(255,255,255,0.20); color:rgba(0,0,0,0.84); }
+.pill .wv-icon-btn--danger { background:rgba(255,255,255,0.10); border-color:rgba(255,255,255,0.14); color:rgba(255,255,255,0.86); }
 .voicebar-wrapper { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; width:100%; height:100%; }
 .profile-badge { background:color-mix(in oklch, var(--accent) 22%, transparent); border:1px solid color-mix(in oklch, var(--accent) 40%, transparent); border-radius:999px; padding:3px 10px; font-size:11px; color:var(--ink-1); letter-spacing:0.02em; pointer-events:none; white-space:nowrap; }
 .wv-onboarding-wrap, .wv-empty-wrap { width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; background:radial-gradient(1200px 800px at 18% 8%, oklch(95% 0.025 145) 0%, transparent 60%),radial-gradient(900px 700px at 92% 95%, oklch(94% 0.022 165) 0%, transparent 55%),var(--bg-stage); padding:16px 20px; }
@@ -524,6 +537,11 @@ html, body {
 .wv-inline { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .wv-inline.wv-inline-stack { flex-direction:column; align-items:flex-start; }
 .wv-inline-stack { gap:10px; margin-top:4px; }
+.wv-field { width:100%; max-width:420px; display:flex; flex-direction:column; gap:6px; margin-top:4px; }
+.wv-field-label { font-size:12px; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-3); }
+.wv-input { width:100%; height:42px; padding:0 14px; border-radius:10px; border:0.5px solid var(--line-2); background:rgba(255,255,255,0.9); color:var(--ink-1); font:inherit; outline:none; transition:border-color .12s ease, box-shadow .12s ease, background .12s ease; }
+.wv-input::placeholder { color:var(--ink-4); }
+.wv-input:focus { border-color:var(--ink-2); box-shadow:0 0 0 3px color-mix(in oklch, var(--accent) 20%, transparent); background:white; }
 .wv-note { color:var(--ink-3); font-size:13px; }
 .wv-download-progress { width:100%; max-width:420px; display:flex; flex-direction:column; gap:6px; }
 .wv-download-progress-meta { width:100%; display:flex; align-items:center; justify-content:space-between; font-size:12px; color:var(--ink-3); }

@@ -2436,6 +2436,7 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
     };
     let (width, height, min_width, min_height) = settings_window_dimensions();
     if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.set_skip_taskbar(false);
         let _ = win.center();
         let _ = win.show();
         let _ = win.set_focus();
@@ -3964,34 +3965,6 @@ pub fn run() {
             setup_tray(app.handle())?;
             setup_hotkey(app.handle(), state.clone())?;
 
-            // Pre-create Settings off-screen so WebView2 renders eagerly.
-            // visible(false) prevents WebView2 from rendering content, causing a
-            // 10-second blank window on first show. Off-screen + visible is the fix.
-            let app_settings = app.handle().clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                let app_inner = app_settings.clone();
-                let _ = app_settings.run_on_main_thread(move || {
-                    if app_inner.get_webview_window("settings").is_none() {
-                        let (width, height, min_width, min_height) = settings_window_dimensions();
-                        let _ = tauri::WebviewWindowBuilder::new(
-                            &app_inner,
-                            "settings",
-                            tauri::WebviewUrl::App("/?window=settings".into()),
-                        )
-                        .title("OpenDicta")
-                        .inner_size(width, height)
-                        .min_inner_size(min_width, min_height)
-                        .resizable(true)
-                        .decorations(false)
-                        .transparent(true)
-                        .position(-32000.0, -32000.0)
-                        .skip_taskbar(true)
-                        .build();
-                    }
-                });
-            });
-
             // First-run onboarding flow.
             let model_ready = model_data_dir(app.handle())
                 .map(|d| d.join("encoder.int8.onnx").exists())
@@ -4004,12 +3977,43 @@ pub fn run() {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     open_onboarding(&app_firstrun);
                 });
-            } else if !model_ready {
-                let app_model_hint = app.handle().clone();
+            } else {
+                // Pre-create Settings off-screen so WebView2 renders eagerly.
+                // visible(false) prevents WebView2 from rendering content, causing a
+                // blank first show. Off-screen + visible is the fix, but we only
+                // do it after onboarding so first-run stays onboarding-only.
+                let app_settings = app.handle().clone();
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    open_settings_page(&app_model_hint, Some("model"));
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    let app_inner = app_settings.clone();
+                    let _ = app_settings.run_on_main_thread(move || {
+                        if app_inner.get_webview_window("settings").is_none() {
+                            let (width, height, min_width, min_height) = settings_window_dimensions();
+                            let _ = tauri::WebviewWindowBuilder::new(
+                                &app_inner,
+                                "settings",
+                                tauri::WebviewUrl::App("/?window=settings".into()),
+                            )
+                            .title("OpenDicta")
+                            .inner_size(width, height)
+                            .min_inner_size(min_width, min_height)
+                            .resizable(true)
+                            .decorations(false)
+                            .transparent(true)
+                            .position(-32000.0, -32000.0)
+                            .skip_taskbar(false)
+                            .build();
+                        }
+                    });
                 });
+
+                if !model_ready {
+                    let app_model_hint = app.handle().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        open_settings_page(&app_model_hint, Some("model"));
+                    });
+                }
             }
 
             // Idle-kill manager — kills the worker process after it has been

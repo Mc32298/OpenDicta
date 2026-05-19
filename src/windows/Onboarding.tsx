@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button, Notice, StatusBadge } from "../ui/controls";
 import { DEFAULT_SHORTCUT, normalizeShortcutFromEvent } from "../lib/shortcutUtils";
+import { DEFAULT_PREFS, PREFS_KEY, type Prefs } from "../shell/prefs";
 
 type OnboardingState = {
   completed: boolean;
@@ -21,8 +22,18 @@ type ShortcutTarget = "record" | "pushToTalk";
 
 type DownloadProgressEvent = {
   model_id: string;
+  file_index: number;
+  file_total: number;
+  file_bytes: number;
+  file_size: number;
   overall_percent: number;
 };
+
+const STEP_STATUS: Array<{ tone: "info" | "warn"; text: string }> = [
+  { tone: "info", text: "Welcome. Let’s configure your setup." },
+  { tone: "info", text: "Choose the shortcuts you want to use." },
+  { tone: "info", text: "Install the local model required for transcription." },
+];
 
 export default function Onboarding() {
   const [step, setStep] = useState(0);
@@ -36,6 +47,7 @@ export default function Onboarding() {
 
   const [shortcut, setShortcut] = useState(DEFAULT_SHORTCUT);
   const [pushToTalkShortcut, setPushToTalkShortcut] = useState("F6");
+  const [userName, setUserName] = useState("");
   const [modelInstalled, setModelInstalled] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
 
@@ -50,6 +62,7 @@ export default function Onboarding() {
           setShortcut(bindings.record || state.shortcut || DEFAULT_SHORTCUT);
           setPushToTalkShortcut(bindings.push_to_talk || "F6");
         }
+        setUserName(loadStoredUserName());
         setStatus({ tone: "info", text: "Welcome. Let’s configure your setup." });
       } catch (e) {
         setStatus({ tone: "err", text: `Failed to load onboarding state: ${String(e)}` });
@@ -80,7 +93,12 @@ export default function Onboarding() {
   useEffect(() => {
     const unlistenProgress = listen<DownloadProgressEvent>("model-download-progress", (event) => {
       if (event.payload.model_id !== "parakeet") return;
-      setDownloadProgress(event.payload.overall_percent);
+      const totalFiles = Math.max(1, event.payload.file_total || 1);
+      const fileSize = Math.max(1, event.payload.file_size || 1);
+      const completedFilesPercent = (event.payload.file_index / totalFiles) * 100;
+      const currentFilePercent = (event.payload.file_bytes / fileSize) * (100 / totalFiles);
+      const smoothProgress = Math.min(99.5, completedFilesPercent + currentFilePercent);
+      setDownloadProgress(smoothProgress);
     });
 
     const unlistenComplete = listen("model-download-complete", () => {
@@ -93,6 +111,13 @@ export default function Onboarding() {
       void unlistenComplete.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    setStatus((current) => {
+      if (current.tone === "err") return current;
+      return STEP_STATUS[step];
+    });
+  }, [step]);
 
   const saveShortcut = async (target: ShortcutTarget, candidate: string) => {
     setBusy(true);
@@ -147,6 +172,20 @@ export default function Onboarding() {
     }
   };
 
+  const next = async () => {
+    if (step === 0) {
+      const trimmedName = userName.trim();
+      if (!trimmedName) {
+        setStatus({ tone: "warn", text: "Enter your name before continuing." });
+        return;
+      }
+      saveStoredUserName(trimmedName);
+      setUserName(trimmedName);
+      setStatus({ tone: "ok", text: `Nice to meet you, ${trimmedName}.` });
+    }
+    setStep((s) => Math.min(2, s + 1));
+  };
+
   if (loading) {
     return <div className="wv-onboarding-wrap"><div className="wv-onboarding"><div className="wv-onboarding-body"><p>Loading...</p></div></div></div>;
   }
@@ -165,7 +204,23 @@ export default function Onboarding() {
             {step === 1 && "Choose Shortcuts"}
             {step === 2 && "Install Model"}
           </h1>
-          {step === 0 && <p>OpenDicta records while you hold a shortcut, then transcribes locally and pastes into your active app.</p>}
+          {step === 0 && (
+            <div className="wv-inline wv-inline-stack">
+              <p>OpenDicta records while you hold a shortcut, then transcribes locally and pastes into your active app.</p>
+              <label className="wv-field">
+                <span className="wv-field-label">Your name</span>
+                <input
+                  className="wv-input"
+                  type="text"
+                  value={userName}
+                  onChange={(e) => setUserName(e.target.value)}
+                  placeholder="Enter your name"
+                  autoFocus
+                  maxLength={40}
+                />
+              </label>
+            </div>
+          )}
           {step === 1 && (
             <div className="wv-inline wv-inline-stack">
               <p>Pick key combinations for both recording modes.</p>
@@ -205,7 +260,7 @@ export default function Onboarding() {
                 <div className="wv-download-progress" aria-live="polite">
                   <div className="wv-download-progress-meta">
                     <span>Downloading Parakeet V3</span>
-                    <span>{downloadProgress}%</span>
+                    <span>{downloadProgress < 100 ? `${downloadProgress.toFixed(1)}%` : "100%"}</span>
                   </div>
                   <div className="wv-download-progress-track">
                     <div className="wv-download-progress-fill" style={{ width: `${downloadProgress}%` }} />
@@ -220,7 +275,7 @@ export default function Onboarding() {
           <div className="wv-onboarding-actions">
             <Button variant="ghost" disabled={step === 0 || busy} onClick={() => setStep((s) => Math.max(0, s - 1))}>Back</Button>
             {step < 2 && (
-              <Button variant="primary" disabled={busy} onClick={() => setStep((s) => Math.min(2, s + 1))}>Next</Button>
+              <Button variant="primary" disabled={busy || (step === 0 && !userName.trim())} onClick={() => void next()}>Next</Button>
             )}
             {step === 2 && (
               <Button variant="primary" disabled={busy || !modelInstalled} onClick={() => void finish()}>Finish</Button>
@@ -230,6 +285,28 @@ export default function Onboarding() {
       </div>
     </div>
   );
+}
+
+function loadStoredUserName(): string {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return "";
+    const parsed = JSON.parse(raw) as Partial<Prefs>;
+    return typeof parsed.userName === "string" ? parsed.userName : "";
+  } catch {
+    return "";
+  }
+}
+
+function saveStoredUserName(userName: string): void {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Partial<Prefs>) : {};
+    const next: Prefs = { ...DEFAULT_PREFS, ...parsed, userName };
+    localStorage.setItem(PREFS_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore localStorage write failures */
+  }
 }
 
 function ShortcutCaptureRow({
