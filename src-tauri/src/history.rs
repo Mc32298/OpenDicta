@@ -866,7 +866,7 @@ mod tests {
 
     #[test]
     fn count_words_ignores_extra_whitespace() {
-        assert_eq!(count_words("  hello   world\nfrom VoiceNote  "), 4);
+        assert_eq!(count_words("  hello   world\nfrom OpenDicta  "), 4);
     }
 
     #[test]
@@ -957,7 +957,7 @@ mod tests {
     #[test]
     fn save_and_load_history_round_trips_records() {
         let dir =
-            std::env::temp_dir().join(format!("voicenote-history-test-{}", crate::now_millis()));
+            std::env::temp_dir().join(format!("OpenDicta-history-test-{}", crate::now_millis()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("history.json");
         let records = vec![record("1", "2026-05-16T08:00:00Z", 12, 6.0)];
@@ -972,7 +972,7 @@ mod tests {
     #[test]
     fn save_history_accepts_bare_relative_filename() {
         let file = std::path::PathBuf::from(format!(
-            "voicenote-history-bare-{}.json",
+            "OpenDicta-history-bare-{}.json",
             crate::now_millis()
         ));
         let records = vec![record("1", "2026-05-16T08:00:00Z", 12, 6.0)];
@@ -997,7 +997,7 @@ mod tests {
     #[test]
     fn repeated_save_history_uses_latest_contents_and_leaves_no_temp_files() {
         let dir = std::env::temp_dir().join(format!(
-            "voicenote-history-repeated-save-{}",
+            "OpenDicta-history-repeated-save-{}",
             crate::now_millis()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn load_history_returns_empty_when_file_is_missing() {
         let dir =
-            std::env::temp_dir().join(format!("voicenote-history-missing-{}", crate::now_millis()));
+            std::env::temp_dir().join(format!("OpenDicta-history-missing-{}", crate::now_millis()));
         let file = dir.join("missing-history.json");
 
         let loaded = load_history_file(&file, None).unwrap();
@@ -1033,7 +1033,7 @@ mod tests {
     #[test]
     fn append_history_record_sorts_newest_first_and_persists() {
         let dir =
-            std::env::temp_dir().join(format!("voicenote-history-append-{}", crate::now_millis()));
+            std::env::temp_dir().join(format!("OpenDicta-history-append-{}", crate::now_millis()));
         let file = dir.join("history.json");
         let older = record("older", "2026-05-16T08:00:00Z", 12, 6.0);
         let newer = record("newer", "2026-05-16T09:00:00Z", 24, 12.0);
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn append_history_record_sorts_fractional_timestamps_and_invalid_last() {
         let dir =
-            std::env::temp_dir().join(format!("voicenote-history-sort-{}", crate::now_millis()));
+            std::env::temp_dir().join(format!("OpenDicta-history-sort-{}", crate::now_millis()));
         let file = dir.join("history.json");
         let invalid = record("invalid", "not-a-date", 12, 6.0);
         let whole = record("whole", "2026-05-16T08:00:00Z", 12, 6.0);
@@ -1073,7 +1073,7 @@ mod tests {
     #[test]
     fn load_history_migrates_plaintext_to_encrypted_file() {
         let dir =
-            std::env::temp_dir().join(format!("voicenote-history-migrate-{}", crate::now_millis()));
+            std::env::temp_dir().join(format!("OpenDicta-history-migrate-{}", crate::now_millis()));
         std::fs::create_dir_all(&dir).unwrap();
         let encrypted = dir.join("history.bin");
         let legacy = dir.join("history.json");
@@ -1093,7 +1093,7 @@ mod tests {
     #[test]
     fn migration_failure_leaves_plaintext_history_intact() {
         let dir = std::env::temp_dir().join(format!(
-            "voicenote-history-migrate-fail-{}",
+            "OpenDicta-history-migrate-fail-{}",
             crate::now_millis()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn malformed_encrypted_history_fails_safely() {
         let dir = std::env::temp_dir().join(format!(
-            "voicenote-history-malformed-{}",
+            "OpenDicta-history-malformed-{}",
             crate::now_millis()
         ));
         std::fs::create_dir_all(&dir).unwrap();

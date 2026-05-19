@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import PageHead from "./PageHead";
 import {
-  SearchIcon, MicIcon, CopyIcon, PlayIcon, EditIcon, MailIcon, SparkleIcon,
+  CopyIcon,
 } from "../ui/icons";
 
 interface DashboardStats {
@@ -42,6 +42,30 @@ interface DashboardLatestData {
   recent_sessions: RecentSession[];
 }
 
+function modelLabelFromId(modelId: string | null): string {
+  if (!modelId) return "Unknown";
+  switch (modelId) {
+    case "parakeet":
+      return "Parakeet V3";
+    case "canary_qwen_2_5b":
+      return "Canary Qwen 2.5B";
+    case "qwen3_asr":
+      return "Whisper Pro";
+    case "whisper_small":
+      return "Whisper Small";
+    case "whisper_medium":
+      return "Whisper Medium";
+    case "whisper_large":
+      return "Whisper Pro+";
+    case "whisper_large_v3_turbo":
+      return "Whisper Pro";
+    default:
+      return modelId
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+}
+
 function todayTrend(today: number, yesterday: number): string {
   if (yesterday === 0) return today > 0 ? "First recording today" : "No recordings yet today";
   const pct = Math.round(((today - yesterday) / yesterday) * 100);
@@ -64,10 +88,12 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
 
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [latest, setLatest] = useState<DashboardLatestData | null>(null);
+  const [activeModelId, setActiveModelId] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<DashboardStats>("get_dashboard_stats").then(setStats).catch(console.error);
     invoke<DashboardLatestData>("get_latest_transcript_data").then(setLatest).catch(console.error);
+    invoke<string>("get_active_model_id").then(setActiveModelId).catch(console.error);
   }, []);
 
   const miniBarsData = useMemo(() => {
@@ -77,6 +103,17 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
     return vals.map(v => v / max);
   }, [stats]);
 
+  const modelInUse = useMemo(() => {
+    return modelLabelFromId(activeModelId);
+  }, [activeModelId]);
+
+  const sessionQuality = useMemo(() => {
+    if (!latest?.latest) return "Awaiting session";
+    if (latest.latest.word_count >= 80) return "High";
+    if (latest.latest.word_count >= 30) return "Good";
+    return "Fair";
+  }, [latest]);
+
   return (
     <div className="page">
       <PageHead
@@ -84,12 +121,12 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
         title={<>{greet}, <em>{userName}</em> <span style={{ display: "inline-block", transform: "rotate(8deg)" }}>👋</span></>}
         sub="Here's your speech-to-text snapshot for today."
       >
-        <button className="btn btn-sm">
-          <SearchIcon style={{ width: 14, height: 14 }} /> Browse history
-        </button>
-        <button className="btn btn-accent btn-sm">
-          <MicIcon style={{ width: 14, height: 14 }} /> New recording
-        </button>
+        <div className="chip" style={{ pointerEvents: "none" }}>
+          Model in use: <strong style={{ fontWeight: 600 }}>{modelInUse}</strong>
+        </div>
+        <div className="chip" style={{ pointerEvents: "none" }}>
+          Session quality: <strong style={{ fontWeight: 600 }}>{sessionQuality}</strong>
+        </div>
       </PageHead>
 
       {/* Stat row */}
@@ -136,7 +173,6 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn btn-sm btn-ghost"><CopyIcon style={{ width: 14, height: 14 }} /> Copy</button>
-              <button className="btn btn-sm"><PlayIcon style={{ width: 12, height: 12 }} /> Play</button>
             </div>
           </div>
 
@@ -151,14 +187,6 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
             {latest?.latest
               ? latest.latest.text.slice(0, 500) + (latest.latest.text.length > 500 ? "…" : "")
               : <span style={{ color: "var(--ink-3)" }}>Your transcript will appear here after your first recording.</span>}
-          </div>
-
-          <div style={{ marginTop: "auto", paddingTop: 18, display: "flex", gap: 10 }}>
-            <button className="btn btn-primary"><EditIcon style={{ width: 14, height: 14 }} /> Open in editor</button>
-            <button className="btn"><MailIcon style={{ width: 14, height: 14 }} /> Send as email</button>
-            <button className="btn btn-ghost mt-auto">
-              <SparkleIcon style={{ width: 14, height: 14 }} /> Refine with AI
-            </button>
           </div>
         </div>
 

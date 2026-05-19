@@ -5,5 +5,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    voicenote_lib::run();
+    opendicta_lib::run();
 }

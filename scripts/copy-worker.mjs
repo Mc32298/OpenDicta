@@ -2,8 +2,8 @@
  * Copies the release worker binary into src-tauri/binaries/ with the
  * target-triple suffix that Tauri's externalBin bundler expects.
  *
- * Tauri looks for:  src-tauri/binaries/voicenote-worker-<triple>[.exe]
- * Cargo produces:   target/release/voicenote-worker[.exe]
+ * Tauri looks for:  src-tauri/binaries/opendicta-worker-<triple>[.exe]
+ * Cargo produces:   target/release/opendicta-worker[.exe]
  */
 
 import { execSync } from "child_process";
@@ -25,9 +25,9 @@ if (!triple) {
 }
 
 const ext = process.platform === "win32" ? ".exe" : "";
-const src = join(root, "target", "release", `voicenote-worker${ext}`);
+const src = join(root, "target", "release", `opendicta-worker${ext}`);
 const destDir = join(root, "src-tauri", "binaries");
-const dest = join(destDir, `voicenote-worker-${triple}${ext}`);
+const dest = join(destDir, `opendicta-worker-${triple}${ext}`);
 
 mkdirSync(destDir, { recursive: true });
 copyFileSync(src, dest);

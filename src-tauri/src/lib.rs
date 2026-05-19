@@ -1,11 +1,11 @@
-//! VoiceNote — Rust backend
+//! OpenDicta — Rust backend
 //!
 //! Responsibilities:
 //!   - System tray + menu
 //!   - Global hotkey (hold to record, release to transcribe)
 //!   - Real microphone capture via cpal
 //!   - WAV file saving via hound
-//!   - voicenote-worker sidecar management (Parakeet TDT 0.6B v3 via sherpa-onnx)
+//!   - OpenDicta-worker sidecar management (Parakeet TDT 0.6B v3 via sherpa-onnx)
 //!   - Auto-paste via enigo (types text into the active app)
 
 #[allow(dead_code)]
@@ -59,7 +59,7 @@ struct AppState {
     /// How many channels the device gave us (1 = mono, 2 = stereo)
     device_channels: Arc<Mutex<u16>>,
 
-    /// stdin of the running voicenote-worker process.
+    /// stdin of the running OpenDicta-worker process.
     /// We write WAV file paths here; the worker transcribes and replies on stdout.
     sidecar_stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
     /// Child process handle for the running worker.
@@ -666,10 +666,119 @@ async fn cancel_recording(
 }
 
 #[tauri::command]
-async fn check_for_updates() -> Result<(), String> {
-    // TODO M8: wire up tauri-plugin-updater
-    println!("Checking for updates...");
-    Ok(())
+async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> {
+    #[derive(serde::Deserialize)]
+    struct GithubRelease {
+        tag_name: String,
+        html_url: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct GithubTag {
+        name: String,
+    }
+
+    fn normalize_version(value: &str) -> &str {
+        value.trim().trim_start_matches('v')
+    }
+
+    fn is_newer_version(current: &str, latest: &str) -> bool {
+        match (
+            semver::Version::parse(normalize_version(current)),
+            semver::Version::parse(normalize_version(latest)),
+        ) {
+            (Ok(current), Ok(latest)) => latest > current,
+            _ => normalize_version(current) != normalize_version(latest),
+        }
+    }
+
+    let current_version = app.package_info().version.to_string();
+    let client = reqwest::Client::builder()
+        .user_agent("OpenDicta/0.1 (update-check)")
+        .build()
+        .map_err(|e| format!("Failed to build update checker: {}", e))?;
+
+    let release_response = client
+        .get("https://api.github.com/repos/Mc32298/OpenDicta/releases/latest")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to contact GitHub: {}", e))?;
+
+    if release_response.status().is_success() {
+        let release = release_response
+            .json::<GithubRelease>()
+            .await
+            .map_err(|e| format!("Failed to parse update response: {}", e))?;
+
+        let latest_version = normalize_version(&release.tag_name).to_string();
+        let update_available = is_newer_version(&current_version, &latest_version);
+        let message = if update_available {
+            format!("Update available: {} (current {}).", latest_version, current_version)
+        } else {
+            format!("You're on the latest version: {}.", current_version)
+        };
+
+        return Ok(UpdateCheckResult {
+            current_version,
+            latest_version,
+            update_available,
+            release_url: release.html_url,
+            message,
+        });
+    }
+
+    if release_response.status() != reqwest::StatusCode::NOT_FOUND {
+        return Err(format!(
+            "GitHub update check failed: HTTP status client error ({}) for url ({})",
+            release_response.status(),
+            "https://api.github.com/repos/Mc32298/OpenDicta/releases/latest"
+        ));
+    }
+
+    let tags = client
+        .get("https://api.github.com/repos/Mc32298/OpenDicta/tags")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to contact GitHub tags endpoint: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("GitHub tag lookup failed: {}", e))?
+        .json::<Vec<GithubTag>>()
+        .await
+        .map_err(|e| format!("Failed to parse tag response: {}", e))?;
+
+    let Some(tag) = tags.first() else {
+        return Ok(UpdateCheckResult {
+            current_version: current_version.clone(),
+            latest_version: current_version.clone(),
+            update_available: false,
+            release_url: "https://github.com/Mc32298/OpenDicta/releases".to_string(),
+            message: format!("No published releases or tags found. Current version is {}.", current_version),
+        });
+    };
+
+    let latest_version = normalize_version(&tag.name).to_string();
+    let update_available = is_newer_version(&current_version, &latest_version);
+    let message = if update_available {
+        format!("Update available: {} (current {}).", latest_version, current_version)
+    } else {
+        format!("You're on the latest version: {}.", current_version)
+    };
+
+    Ok(UpdateCheckResult {
+        current_version,
+        latest_version,
+        update_available,
+        release_url: "https://github.com/Mc32298/OpenDicta/tags".to_string(),
+        message,
+    })
+}
+
+#[derive(serde::Serialize)]
+struct UpdateCheckResult {
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
+    release_url: String,
+    message: String,
 }
 
 #[tauri::command]
@@ -1469,7 +1578,7 @@ async fn download_model(
     let hf_token = state.hf_token.lock().unwrap().clone();
 
     let client = reqwest::Client::builder()
-        .user_agent("voicenote/0.1 (model-downloader)")
+        .user_agent("OpenDicta/0.1 (model-downloader)")
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -2103,22 +2212,22 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
 }
 
 fn hf_token_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.voicenote.app", "huggingface_token")
+    keyring::Entry::new("com.OpenDicta.app", "huggingface_token")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
 fn openai_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.voicenote.app", "openai_api_key")
+    keyring::Entry::new("com.OpenDicta.app", "openai_api_key")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
 fn gemini_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.voicenote.app", "gemini_api_key")
+    keyring::Entry::new("com.OpenDicta.app", "gemini_api_key")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
 fn anthropic_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.voicenote.app", "anthropic_api_key")
+    keyring::Entry::new("com.OpenDicta.app", "anthropic_api_key")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
@@ -2304,7 +2413,7 @@ fn open_onboarding(app: &AppHandle) {
             "onboarding",
             tauri::WebviewUrl::App("/?window=onboarding".into()),
         )
-        .title("VoiceNote Setup")
+        .title("OpenDicta Setup")
         .inner_size(760.0, 520.0)
         .resizable(false)
         .decorations(false)
@@ -2336,7 +2445,7 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
     } else {
         let _ =
             tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App(url.into()))
-                .title("VoiceNote")
+                .title("OpenDicta")
                 .inner_size(width, height)
                 .min_inner_size(min_width, min_height)
                 .resizable(true)
@@ -2693,7 +2802,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     app.emit("recording-stopped", ()).ok();
 
     // 5. Save to a temp WAV file
-    let wav_path = std::env::temp_dir().join(format!("voicenote_{}.wav", now_millis()));
+    let wav_path = std::env::temp_dir().join(format!("OpenDicta_{}.wav", now_millis()));
     if let Err(e) = save_wav(&samples_16khz, &wav_path) {
         *state.pending_transcript_meta.lock().unwrap() = None;
         app.emit(
@@ -2744,7 +2853,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
             *state.pending_transcript_meta.lock().unwrap() = None;
             app.emit(
                 "transcription-error",
-                serde_json::json!({"message": "STT engine is not running. Is voicenote-worker.exe built? Run: cargo build -p voicenote-worker"}),
+                serde_json::json!({"message": "STT engine is not running. Is opendicta-worker.exe built? Run: cargo build -p opendicta-worker"}),
             )
             .ok();
             hide_voicebar(&app);
@@ -2755,7 +2864,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
 
 // ─── Rust Worker Sidecar ──────────────────────────────────────────────────────
 //
-// voicenote-worker is a compiled Rust binary (same workspace) that runs
+// OpenDicta-worker is a compiled Rust binary (same workspace) that runs
 // Parakeet-TDT via sherpa-onnx / ONNX Runtime. It speaks the same
 // stdin/stdout protocol as the old Python sidecar. No Python required.
 //
@@ -2774,9 +2883,9 @@ fn worker_binary_path() -> std::path::PathBuf {
     let profile = "release";
 
     #[cfg(target_os = "windows")]
-    let bin_name = "voicenote-worker.exe";
+    let bin_name = "opendicta-worker.exe";
     #[cfg(not(target_os = "windows"))]
-    let bin_name = "voicenote-worker";
+    let bin_name = "opendicta-worker";
 
     let dev_path = workspace_root.join("target").join(profile).join(bin_name);
     if dev_path.exists() {
@@ -2785,8 +2894,8 @@ fn worker_binary_path() -> std::path::PathBuf {
 
     // Production: Tauri bundles externalBin next to the app executable.
     // Depending on bundle flow, the binary can be either:
-    //   - voicenote-worker(.exe)
-    //   - voicenote-worker-<target-triple>(.exe)
+    //   - opendicta-worker(.exe)
+    //   - opendicta-worker-<target-triple>(.exe)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let prod_path = dir.join(bin_name);
@@ -2801,7 +2910,7 @@ fn worker_binary_path() -> std::path::PathBuf {
                     for entry in entries.flatten() {
                         let path = entry.path();
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.starts_with("voicenote-worker-") && name.ends_with(".exe") {
+                            if name.starts_with("opendicta-worker-") && name.ends_with(".exe") {
                                 return path;
                             }
                         }
@@ -2815,7 +2924,7 @@ fn worker_binary_path() -> std::path::PathBuf {
                     for entry in entries.flatten() {
                         let path = entry.path();
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.starts_with("voicenote-worker-") {
+                            if name.starts_with("opendicta-worker-") {
                                 return path;
                             }
                         }
@@ -2879,9 +2988,9 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
 
     let mut command = std::process::Command::new(&program);
     command
-        .env("VOICENOTE_PROVIDER", &provider)
-        .env("VOICENOTE_MODEL_ID", &model_id)
-        .env("VOICENOTE_MODEL_DIR", &model_dir)
+        .env("OpenDicta_PROVIDER", &provider)
+        .env("OpenDicta_MODEL_ID", &model_id)
+        .env("OpenDicta_MODEL_DIR", &model_dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -3448,7 +3557,7 @@ fn paste_text(app: &AppHandle, text: &str) {
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let settings_item = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
     let separator = tauri::menu::PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItemBuilder::with_id("quit", "Quit VoiceNote").build(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit OpenDicta").build(app)?;
 
     let menu = MenuBuilder::new(app)
         .item(&settings_item)
@@ -3461,7 +3570,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id("main-tray")
         .icon(tray_icon)
         .menu(&menu)
-        .tooltip("VoiceNote — Press Right Ctrl to record")
+        .tooltip("OpenDicta — Press Right Ctrl to record")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "settings" => open_settings(app),
             "quit" => app.exit(0),
@@ -3870,7 +3979,7 @@ pub fn run() {
                             "settings",
                             tauri::WebviewUrl::App("/?window=settings".into()),
                         )
-                        .title("VoiceNote")
+                        .title("OpenDicta")
                         .inner_size(width, height)
                         .min_inner_size(min_width, min_height)
                         .resizable(true)
@@ -3950,7 +4059,7 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("Error running VoiceNote");
+        .expect("Error running OpenDicta");
 }
 
 #[cfg(test)]
@@ -4041,7 +4150,7 @@ mod ai_settings_tests {
     #[test]
     fn model_file_matches_spec_accepts_matching_hash() {
         let unique = crate::now_millis();
-        let dir = std::env::temp_dir().join(format!("voicenote-model-hash-ok-{unique}"));
+        let dir = std::env::temp_dir().join(format!("OpenDicta-model-hash-ok-{unique}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tokens.txt");
         let content = b"voice note tokens";
@@ -4062,7 +4171,7 @@ mod ai_settings_tests {
     #[test]
     fn model_file_matches_spec_rejects_wrong_hash_even_with_matching_size() {
         let unique = crate::now_millis();
-        let dir = std::env::temp_dir().join(format!("voicenote-model-hash-bad-{unique}"));
+        let dir = std::env::temp_dir().join(format!("OpenDicta-model-hash-bad-{unique}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tokens.txt");
         let content = b"voice note tokens";

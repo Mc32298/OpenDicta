@@ -104,7 +104,7 @@ export default function Style({ aiEnabled }: { aiEnabled: boolean }) {
             </div>
           </div>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 11, fontWeight: 500, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 8 }}>VoiceNote outputs</div>
+            <div style={{ fontSize: 11, fontWeight: 500, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 8 }}>OpenDicta outputs</div>
             <StylePreview style={selected} />
           </div>
         </div>
@@ -141,7 +141,7 @@ export default function Style({ aiEnabled }: { aiEnabled: boolean }) {
       <PageHead
         eyebrow="Style"
         title={<>Refine your <em>words</em>.</>}
-        sub="Pick how VoiceNote should reshape your raw transcript after you stop speaking."
+        sub="Pick how OpenDicta should reshape your raw transcript after you stop speaking."
       >
         <div className="chip chip-accent"><SparkleIcon style={{ width: 12, height: 12 }} /> AI is on</div>
       </PageHead>

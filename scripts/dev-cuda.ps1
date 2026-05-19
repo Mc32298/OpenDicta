@@ -1,4 +1,4 @@
-# Build voicenote-worker against CUDA-enabled sherpa-onnx DLLs,
+# Build opendicta-worker against CUDA-enabled sherpa-onnx DLLs,
 # copy required DLLs next to the worker binary, then launch Tauri dev.
 
 $sherpaRoot = "C:\sherpa-onnx-cuda\sherpa-onnx-v1.13.1-cuda-12.x-cudnn-9.x-win-x64-cuda"
@@ -11,7 +11,7 @@ $workerOut  = "target\debug"
 $env:SHERPA_ONNX_LIB_DIR = $sherpaLib
 
 Write-Host "Building worker with CUDA support..."
-cargo build -p voicenote-worker --no-default-features --features cuda
+cargo build -p opendicta-worker --no-default-features --features cuda
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Copy sherpa-onnx + ONNX Runtime CUDA DLLs next to the worker exe

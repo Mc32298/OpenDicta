@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "VoiceNote",
+  "productName": "OpenDicta",
   "version": "0.1.0",
-  "identifier": "com.voicenote.app",
+  "identifier": "com.OpenDicta.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
       {
         "label": "voicebar",
         "url": "/?window=voicebar",
-        "title": "VoiceNote",
+        "title": "OpenDicta",
         "width": 280,
         "height": 62,
         "minWidth": 160,

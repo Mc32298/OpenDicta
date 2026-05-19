@@ -2654,6 +2654,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "opendicta"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "enigo",
+ "futures-util",
+ "hound",
+ "keyring",
+ "reqwest 0.12.28",
+ "rubato",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-global-shortcut",
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "opendicta-worker"
+version = "0.1.0"
+dependencies = [
+ "hound",
+ "sherpa-onnx",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4768,38 +4801,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "voicenote"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "enigo",
- "futures-util",
- "hound",
- "keyring",
- "reqwest 0.12.28",
- "rubato",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-global-shortcut",
- "tokio",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "voicenote-worker"
-version = "0.1.0"
-dependencies = [
- "hound",
- "sherpa-onnx",
- "windows-sys 0.59.0",
-]
 
 [[package]]
 name = "vswhom"

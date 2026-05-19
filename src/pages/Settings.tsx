@@ -32,6 +32,14 @@ type MicrophoneTestResult = {
   message: string;
 };
 
+type UpdateCheckResult = {
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  release_url: string;
+  message: string;
+};
+
 export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: ReturnType<typeof usePrefs>[1] }) {
   const [s, setS] = useState({
     launch: true,
@@ -46,6 +54,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   const [micDevices, setMicDevices] = useState<string[]>([]);
   const [selectedMic, setSelectedMic] = useState<string>("");
   const [inputLevel, setInputLevel] = useState(0);
+  const [micMeterEnabled, setMicMeterEnabled] = useState(false);
   const [soundsEnabled, setSoundsEnabled] = useState(false);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [shortcuts, setShortcuts] = useState<Record<string, string>>({
@@ -58,6 +67,8 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   const [capturePreview, setCapturePreview] = useState<string | null>(null);
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [diagnosticMessage, setDiagnosticMessage] = useState<string>("");
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState<string>("Up to date. Latest models synced 2 hours ago.");
 
   useEffect(() => {
     let cancelled = false;
@@ -122,6 +133,20 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
       setDiagnosticMessage(`Diagnostics failed: ${String(err)}`);
     } finally {
       setDiagnosticBusy(false);
+    }
+  }
+
+  async function runUpdateCheck() {
+    if (updateBusy) return;
+    setUpdateBusy(true);
+    setUpdateMessage("Checking for updates...");
+    try {
+      const result = await invoke<UpdateCheckResult>("check_for_updates");
+      setUpdateMessage(result.message);
+    } catch (err) {
+      setUpdateMessage(`Update check failed: ${String(err)}`);
+    } finally {
+      setUpdateBusy(false);
     }
   }
 
@@ -193,6 +218,10 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   }, [editingShortcut]);
 
   useEffect(() => {
+    if (!micMeterEnabled) {
+      setInputLevel(0);
+      return;
+    }
     let cancelled = false;
     let rafId: number | null = null;
     let stream: MediaStream | null = null;
@@ -247,14 +276,14 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
       if (stream) stream.getTracks().forEach((t) => t.stop());
       if (context) void context.close();
     };
-  }, [selectedMic]);
+  }, [selectedMic, micMeterEnabled]);
 
   return (
     <div className="page">
       <PageHead
         eyebrow="Settings"
         title={<>General <em>preferences</em>.</>}
-        sub="The fiddly bits. Hardware, shortcuts, and how VoiceNote behaves on launch."
+        sub="The fiddly bits. Hardware, shortcuts, and how OpenDicta behaves on launch."
       >
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
           <button className="btn btn-sm" onClick={() => void runDiagnostics()} disabled={diagnosticBusy}>
@@ -360,7 +389,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
 
           <div className="card card-lg">
             <div className="section-title">Startup</div>
-            <Setting label="Open at login" desc="Launch VoiceNote when you sign in." icon={<PowerIcon style={{ width: 18, height: 18 }} />}>
+            <Setting label="Open at login" desc="Launch OpenDicta when you sign in." icon={<PowerIcon style={{ width: 18, height: 18 }} />}>
               <div
                 className="toggle"
                 data-on={autostartEnabled}
@@ -407,9 +436,22 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
             </Setting>
             <Divider />
             <div style={{ padding: "14px 0 4px" }}>
-              <div style={{ fontSize: 11, fontWeight: 500, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 8 }}>Input level</div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 500, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--ink-3)" }}>Input level</div>
+                <button
+                  className="btn btn-sm"
+                  type="button"
+                  onClick={() => setMicMeterEnabled((prev) => !prev)}
+                >
+                  {micMeterEnabled ? "Disable meter" : "Enable microphone meter"}
+                </button>
+              </div>
               <MicLevel level={inputLevel} />
-              <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 6 }}>Speak normally. Aim for the green zone.</div>
+              <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 6 }}>
+                {micMeterEnabled
+                  ? "Speak normally. Aim for the green zone."
+                  : "Enable the meter to preview microphone input."}
+              </div>
             </div>
           </div>
 
@@ -433,11 +475,18 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
                 <SparkleIcon style={{ width: 18, height: 18 }} />
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 600 }}>VoiceNote 2.4.1</div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>OpenDicta 2.4.1</div>
                 <div style={{ fontSize: 12, color: "oklch(75% 0.008 85)", marginTop: 4, lineHeight: 1.5 }}>
-                  Up to date. Latest models synced 2 hours ago.
+                  {updateMessage}
                 </div>
-                <button className="btn btn-sm btn-ghost" style={{ marginTop: 10, color: "oklch(95% 0.005 85)" }}>Check for updates →</button>
+                <button
+                  className="btn btn-sm btn-ghost"
+                  style={{ marginTop: 10, color: "oklch(95% 0.005 85)" }}
+                  onClick={() => void runUpdateCheck()}
+                  disabled={updateBusy}
+                >
+                  {updateBusy ? "Checking..." : "Check for updates →"}
+                </button>
               </div>
             </div>
           </div>

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for VoiceNote",
+  "description": "Default permissions for OpenDicta",
   "windows": ["voicebar", "settings"],
   "permissions": [
     "core:default",

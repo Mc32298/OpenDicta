@@ -3,7 +3,7 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
-    "externalBin": ["binaries/voicenote-worker"],
+    "externalBin": ["binaries/opendicta-worker"],
     "resources": {}
   }
 }

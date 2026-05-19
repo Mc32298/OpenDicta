@@ -1,6 +1,6 @@
 /// Load ASR model via sherpa-onnx.
 ///
-/// Model is selected by the VOICENOTE_MODEL_ID environment variable:
+/// Model is selected by the OPENDICTA_MODEL_ID environment variable:
 ///   "parakeet"             — Parakeet-TDT 0.6B v3 (INT8), NeMo Transducer
 ///   "canary_qwen_2_5b"     — Canary-Qwen-2.5B (INT8), NeMo Canary
 ///   "whisper_small"        — Whisper Small (INT8)
@@ -8,9 +8,9 @@
 ///   "whisper_large"        — Whisper Large v2 (INT8)
 ///   "whisper_large_v3_turbo" — Whisper Large v3 Turbo (INT8)
 ///
-/// Model files are expected in the directory set by VOICENOTE_MODEL_DIR.
+/// Model files are expected in the directory set by OPENDICTA_MODEL_DIR.
 ///
-/// GPU: set env var VOICENOTE_PROVIDER=cuda  (NVIDIA) or directml  (Windows generic GPU)
+/// GPU: set env var OPENDICTA_PROVIDER=cuda  (NVIDIA) or directml  (Windows generic GPU)
 
 use std::path::PathBuf;
 use sherpa_onnx::{
@@ -20,12 +20,12 @@ use sherpa_onnx::{
 };
 
 pub fn load() -> Result<OfflineRecognizer, Box<dyn std::error::Error>> {
-    let model_id = std::env::var("VOICENOTE_MODEL_ID")
+    let model_id = std::env::var("OpenDicta_MODEL_ID")
         .unwrap_or_else(|_| "parakeet".to_string());
 
     let dir = find_model_dir(&model_id)?;
 
-    let provider = std::env::var("VOICENOTE_PROVIDER")
+    let provider = std::env::var("OpenDicta_PROVIDER")
         .unwrap_or_else(|_| "cpu".to_string());
     let num_threads = num_cpus().min(4) as i32;
 
@@ -188,7 +188,7 @@ fn check_files(dir: &PathBuf, required: &[&str]) -> Result<(), Box<dyn std::erro
 
 fn find_model_dir(model_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     // First priority: explicit path from Tauri host.
-    if let Ok(dir) = std::env::var("VOICENOTE_MODEL_DIR") {
+    if let Ok(dir) = std::env::var("OpenDicta_MODEL_DIR") {
         let p = PathBuf::from(dir);
         if p.exists() {
             return Ok(p);
@@ -209,7 +209,7 @@ fn find_model_dir(model_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>>
     #[cfg(target_os = "windows")]
     if let Ok(appdata) = std::env::var("APPDATA") {
         return Ok(PathBuf::from(appdata)
-            .join("voicenote")
+            .join("OpenDicta")
             .join("models")
             .join(model_id));
     }
@@ -219,7 +219,7 @@ fn find_model_dir(model_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>>
         return Ok(PathBuf::from(home)
             .join(".local")
             .join("share")
-            .join("voicenote")
+            .join("OpenDicta")
             .join("models")
             .join(model_id));
     }

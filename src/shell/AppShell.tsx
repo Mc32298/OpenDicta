@@ -71,7 +71,7 @@ export default function AppShell() {
   }, []);
 
   useEffect(() => {
-    document.title = `VoiceNote — ${NAV.find((n) => n.id === page)?.label ?? ""}`;
+    document.title = `OpenDicta — ${NAV.find((n) => n.id === page)?.label ?? ""}`;
   }, [page]);
 
   useEffect(() => {
@@ -94,7 +94,7 @@ export default function AppShell() {
             <i onClick={() => void getCurrentWindow().hide()} role="button" aria-label="Minimize" style={{ cursor: "pointer" }} />
             <i aria-disabled />
           </div>
-          <div className="title">VoiceNote — {current.label}</div>
+          <div className="title">OpenDicta — {current.label}</div>
           <div style={{ width: 54 }} />
         </div>
 
@@ -102,7 +102,7 @@ export default function AppShell() {
           <aside className="side">
             <div className="brand">
               <div className="brand-mark">V</div>
-              <div className="brand-text">VoiceNote</div>
+              <div className="brand-text">OpenDicta</div>
             </div>
             <nav className="nav">
               {NAV.map((item) => (

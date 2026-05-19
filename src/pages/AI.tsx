@@ -157,7 +157,7 @@ export default function AI({ aiEnabled, setAiEnabled }: { aiEnabled: boolean; se
       <PageHead
         eyebrow="AI"
         title={<>Bring your own <em>brain</em>.</>}
-        sub="Pick a provider and paste your API key. VoiceNote stores it locally — your keys never touch our servers."
+        sub="Pick a provider and paste your API key. OpenDicta stores it locally — your keys never touch our servers."
       >
         <div className="chip" style={{ background: aiEnabled ? "var(--accent-soft)" : "var(--bg-sunken)" }}>
           <span style={{ width: 6, height: 6, borderRadius: "50%", background: aiEnabled ? "oklch(60% 0.18 145)" : "var(--ink-4)" }} />

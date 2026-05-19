@@ -1,5 +1,5 @@
 [package]
-name = "voicenote"
+name = "opendicta"
 version = "0.1.0"
 description = "Push-to-talk speech-to-text app"
 authors = []
@@ -7,7 +7,7 @@ edition = "2021"
 
 # Required by Tauri — don't remove
 [lib]
-name = "voicenote_lib"
+name = "opendicta_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -44,6 +44,7 @@ futures-util = "0.3"
 sha2 = "0.10"
 rubato = "0.16"
 keyring = "3"
+semver = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Security_Cryptography", "Win32_System_Memory"] }

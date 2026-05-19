@@ -143,7 +143,7 @@ export default function Insights() {
         <Tip
           icon={<BoltIcon style={{ width: 18, height: 18 }} />}
           title="Skip the punctuation pause"
-          body="VoiceNote auto-inserts periods when you pause 1.2s. Speak through them and let the model handle it — users gain ~14% WPM."
+          body="OpenDicta auto-inserts periods when you pause 1.2s. Speak through them and let the model handle it — users gain ~14% WPM."
         />
         <Tip
           icon={<SparkleIcon style={{ width: 18, height: 18 }} />}
