@@ -7,7 +7,7 @@ import {
 } from "../ui/icons";
 
 const STYLES = [
-  { id: "raw",     name: "Raw transcript",     desc: "Verbatim. Nothing changed.",            Ico: MicIcon },
+  { id: "raw",     name: "Raw transcript",     desc: "Verbatim. Nothing changed. No AI processing.",            Ico: MicIcon },
   { id: "grammar", name: "Fix grammar",         desc: "Punctuation + sentence flow.",          Ico: CheckIcon },
   { id: "email",   name: "Email",               desc: "Subject + greeting + sign-off.",        Ico: MailIcon },
   { id: "prompt",  name: "Prompt engineering",  desc: "Reformats into a clean LLM prompt.",    Ico: CodeIcon },
