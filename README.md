@@ -1,109 +1,63 @@
-# VoiceNote
+# OpenDicta 🎙️
 
-> Push-to-talk speech-to-text. Hold the hotkey, speak, release — text is pasted automatically.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-☕-FFDD00.svg)](https://www.buymeacoffee.com/SPINOP)
 
-Built with **Tauri 2.0** (Rust + React) and **NVIDIA Parakeet TDT 0.6B v3** (via sherpa-onnx / ONNX Runtime). No Python required.
+**Speak *Freely*. Stay In Control.**
 
-**Idle RAM: ~150 MB** — the worker process is killed when idle and respawned on demand.
+OpenDicta is a free, open-source speech-to-text app built with Tauri and Rust. It runs completely offline on your device, keeps your voice private, and types directly into any focused text field. Optional AI features are available only when you explicitly choose to use them.
 
----
+## ✨ Features
 
-## Prerequisites
+* **100% Local & Offline**: A local ASR engine (`whisper-local`) handles transcription on your CPU with roughly 0.21s latency. No audio is ever uploaded.
+* **Types Anywhere**: Press your shortcut in any browser, IDE, terminal, or chat. OpenDicta types straight into the active text field (tested on 60+ apps).
+* **25 Supported Languages**: Speak in English, Danish, German, Spanish, French, and 20 other European languages.
+* **Cross-Platform**: Available for Windows (10/11), macOS (12+ Apple Silicon and Intel), and major Linux distros.
+* **Privacy First**: No telemetry, no account needed, and no subscriptions. Audio buffers live only in RAM and are discarded immediately.
+* **Optional AI Polish**: Plug in your own API key (Anthropic, OpenAI, Gemini, or a local LLM endpoint) to format, summarise, clean up tone, or translate your text. Traffic flows directly from your machine to the provider—we never proxy your traffic.
 
-- **Rust 1.77+** — [rustup.rs](https://rustup.rs)
-- **Node.js 20+** — [nodejs.org](https://nodejs.org)
-- **Windows only:** [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) + [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)
-- **macOS only:** `xcode-select --install`
+## 🛠️ Use Cases
 
----
+* **Developers**: Dictate PR descriptions and commit messages straight into your terminal or IDE without proprietary code touching the cloud.
+* **IT Support**: Turn long spoken explanations into polite, structured ticket responses.
+* **Students**: Transcribe lectures on-device with zero internet connection required.
+* **Freelancers & Writers**: Draft notes, emails, and scope docs at the speed of thought while keeping your personal writing cadence.
 
-## Setup
+## 🚀 Getting Started
 
-### 1. Install dependencies
-```bash
-npm install
-```
+*OpenDicta is currently in Beta. [Join the waitlist](https://www.opendicta.spinop.com/) for v1.0 early access.*
 
-### 2. Download the ASR model
-Launch the app once — it will open Settings → Model automatically and prompt you to download the model (~280 MB total, four INT8 ONNX files from HuggingFace).
+### Prerequisites (for building from source)
+- Rust
+- Node.js / npm
+- Tauri CLI
 
-Or place the files manually in:
-- **Windows:** `%APPDATA%\VoiceNote\models\parakeet\`
-- **macOS/Linux:** `~/.local/share/VoiceNote/models/parakeet/`
+*(Installation instructions and build commands will be added upon the v1.0 release)*
 
-Required files: `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx`, `tokens.txt`
+## 🧠 Optional AI Configuration
 
----
+OpenDicta is powerful out of the box, but you can enhance your transcripts using an LLM of your choice:
+1. Open **Settings**.
+2. Paste your preferred API key or local LLM endpoint.
+3. Configure custom shortcuts for specific AI workflows:
+   * **Format**: Turn rambles into structured headings and bullet points.
+   * **Summarise**: Condense long transcripts into decisions and action items.
+   * **Tone Cleanup**: Strip filler words and verbal tics.
+   * **Translate**: Dictate in one language and instantly output text in another.
 
-## Development
+## 🤝 Contributing
 
-```bash
-npm run tauri:dev
-```
+OpenDicta started as a small, opinionated script and grew into a privacy-respecting tool. We welcome forks, audits, and code contributions! The local app, the model-downloader, and the workflow runtime all live in this repository.
 
-This builds the worker binary, then starts Vite (frontend hot-reload) + Tauri simultaneously.
+## ☕ Support the Project
 
----
+OpenDicta is 100% free forever—no paywalls, no pro tiers, and no upsells. The project stays alive through donations and partners. If you find this tool invisible and essential, consider supporting us:
+* [Buy us a coffee](https://www.buymeacoffee.com/SPINOP)
+* [Become a partner](mailto:info@spinop.com)
 
-## Building for distribution
+## 📄 License
 
-```bash
-npm run tauri:build
-```
-
-This:
-1. Compiles `voicenote-worker` in release mode
-2. Copies the binary with the correct target-triple suffix into `src-tauri/binaries/`
-3. Runs `cargo tauri build` with the bundle config (NSIS installer on Windows)
-
-Output: `src-tauri/target/release/bundle/`
-
----
-
-## Project structure
-
-```
-voicenote/
-├── src/                        # React frontend
-│   ├── App.tsx                 # Window router (?window= param)
-│   ├── styles.css              # Global dark styles
-│   ├── components/
-│   │   └── Waveform.tsx        # Animated waveform
-│   └── windows/
-│       ├── VoiceBar.tsx        # Recording pill UI
-│       └── Settings.tsx        # Settings window
-│
-├── src-tauri/                  # Tauri host (Rust)
-│   ├── src/lib.rs              # Tray, hotkey, audio, worker IPC, paste
-│   ├── capabilities/
-│   │   └── default.json        # Tauri 2.0 permissions
-│   ├── tauri.conf.json         # App config (dev)
-│   └── tauri.bundle.conf.json  # Bundle overrides (production)
-│
-├── worker/                     # Native ASR sidecar (Rust)
-│   ├── src/main.rs             # stdin/stdout protocol loop
-│   ├── src/model.rs            # sherpa-onnx Parakeet loader
-│   └── src/audio.rs            # WAV read + resample to 16kHz mono
-│
-└── scripts/
-    └── copy-worker.mjs         # Copies worker binary for bundling
-```
+This project is licensed under the [MIT License](LICENSE).
 
 ---
-
-## How it works
-
-1. **Record** — `cpal` captures mic audio while the hotkey is held
-2. **Save** — PCM is written to a temp WAV via `hound`
-3. **Transcribe** — WAV path is sent to `voicenote-worker` via stdin; the worker runs Parakeet TDT INT8 through ONNX Runtime and returns a `TRANSCRIPT:` line on stdout
-4. **Paste** — `enigo` types the transcript into the focused application
-5. **Idle** — after the configured timeout the worker process is killed; the OS fully reclaims its RAM (~200 MB). It respawns automatically on the next hotkey press.
-
----
-
-## GPU acceleration
-
-Set the ONNX provider in **Settings → Model → GPU Provider**:
-- `cpu` — default, works everywhere
-- `directml` — Windows generic GPU (AMD, Intel, NVIDIA)
-- `cuda` — NVIDIA only, requires CUDA toolkit
+*Made quietly in Denmark.*
