@@ -43,7 +43,12 @@
       "Bash(node -e \"import\\('./src/lib/shortcutUtils.ts'\\).then\\(m => console.log\\(Object.keys\\(m\\)\\)\\).catch\\(e => console.log\\('Error:', e.message\\)\\)\")",
       "Bash(cat)",
       "Bash(npx tsx *)",
-      "PowerShell(\\(Get-Content \"C:\\\\Users\\\\MathiasNielsen-SPINO\\\\Downloads\\\\Projects\\\\VoiceNote_V5\\\\voicenote\\\\src-tauri\\\\src\\\\lib.rs\" | Measure-Object -Line\\).Lines)"
+      "PowerShell(\\(Get-Content \"C:\\\\Users\\\\MathiasNielsen-SPINO\\\\Downloads\\\\Projects\\\\VoiceNote_V5\\\\voicenote\\\\src-tauri\\\\src\\\\lib.rs\" | Measure-Object -Line\\).Lines)",
+      "Skill(engineering:code-review)",
+      "Skill(engineering:code-review:*)",
+      "Bash(del \"C:\\\\Users\\\\MathiasNielsen-SPINO\\\\Downloads\\\\Projects\\\\VoiceNote_V5\\\\voicenote\\\\src\\\\windows\\\\settingsTypes.ts\")",
+      "Skill(anthropic-skills:vibe-coding-expert)",
+      "Skill(anthropic-skills:vibe-coding-expert:*)"
     ],
     "additionalDirectories": [
       "C:\\Users\\MathiasNielsen-SPINO\\AppData\\Roaming\\com.voicenote.app\\models\\parakeet"

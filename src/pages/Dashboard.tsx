@@ -58,7 +58,7 @@ function modelLabelFromId(modelId: string | null): string {
     case "whisper_large":
       return "Whisper Pro+";
     case "whisper_large_v3_turbo":
-      return "Whisper Pro";
+      return "Whisper MAX";
     default:
       return modelId
         .replace(/_/g, " ")
@@ -79,7 +79,7 @@ function fmtHours(minutes: number): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
-export default function Dashboard({ userName }: { userName: string; accent?: string }) {
+export default function Dashboard({ userName }: { userName: string }) {
   const hour = new Date().getHours();
   const greet =
     hour < 5 ? "Up late" :
@@ -195,7 +195,7 @@ export default function Dashboard({ userName }: { userName: string; accent?: str
             <h3>Recording streak</h3>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 2 }}>
               <div className="stat-num" style={{ fontSize: 36 }}>
-                {stats?.current_streak_days ?? 23}
+                {stats?.current_streak_days ?? 0}
               </div>
               <span className="stat-unit">days</span>
             </div>

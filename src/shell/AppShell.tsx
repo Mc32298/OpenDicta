@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { usePrefs, type Prefs } from "./prefs";
+import { usePrefs, THEMES, type Prefs } from "./prefs";
 import { ModelManagerContext, useModelManagerState } from "../hooks/useModelManager";
 import {
   DashboardIcon,
@@ -61,7 +61,9 @@ export default function AppShell() {
 
   useEffect(() => {
     const root = document.documentElement;
-    root.style.setProperty("--accent", prefs.accent);
+    // Validate accent against known theme values before applying to CSS to prevent CSS injection.
+    const safeAccent = THEMES.find((t) => t.accent.toLowerCase() === prefs.accent.toLowerCase())?.accent ?? THEMES[0].accent;
+    root.style.setProperty("--accent", safeAccent);
     root.dataset.density = prefs.density;
     root.dataset.sidebar = prefs.sidebar;
   }, [prefs.accent, prefs.density, prefs.sidebar]);
@@ -144,7 +146,7 @@ function renderPage(
   setPrefs: ReturnType<typeof usePrefs>[1],
 ): ReactNode {
   switch (page) {
-    case "dashboard": return <Dashboard userName={prefs.userName} accent={prefs.accent} />;
+    case "dashboard": return <Dashboard userName={prefs.userName} />;
     case "insights":  return <Insights />;
     case "models":    return <Models />;
     case "style":     return <Style aiEnabled={prefs.aiEnabled} />;

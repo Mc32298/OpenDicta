@@ -36,7 +36,7 @@ export default function EmptyStates() {
       setTab(normalizeTab(event.payload));
     });
     return () => {
-      unlisten.then((fn) => fn());
+      void unlisten.then((fn) => fn());
     };
   }, []);
 

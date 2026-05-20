@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import PageHead from "./PageHead";
 import { normalizeShortcutFromEvent } from "../lib/shortcutUtils";
 import { THEMES, usePrefs } from "../shell/prefs";
@@ -41,15 +42,7 @@ type UpdateCheckResult = {
 };
 
 export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: ReturnType<typeof usePrefs>[1] }) {
-  const [s, setS] = useState({
-    launch: true,
-    menubar: true,
-    autoUpdate: true,
-    mic: "AirPods Pro · External",
-    pushToTalk: "Hold Fn",
-    record: "⌥ Space",
-    stop: "Esc",
-  });
+  const [s, setS] = useState({ menubar: true, autoUpdate: true });
   const set = <K extends keyof typeof s>(k: K, v: (typeof s)[K]) => setS((prev) => ({ ...prev, [k]: v }));
   const [micDevices, setMicDevices] = useState<string[]>([]);
   const [selectedMic, setSelectedMic] = useState<string>("");
@@ -69,6 +62,11 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   const [diagnosticMessage, setDiagnosticMessage] = useState<string>("");
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string>("Up to date. Latest models synced 2 hours ago.");
+  const [appVersion, setAppVersion] = useState<string>("");
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(console.error);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -475,7 +473,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
                 <SparkleIcon style={{ width: 18, height: 18 }} />
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 600 }}>OpenDicta 2.4.1</div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>OpenDicta {appVersion}</div>
                 <div style={{ fontSize: 12, color: "oklch(75% 0.008 85)", marginTop: 4, lineHeight: 1.5 }}>
                   {updateMessage}
                 </div>
