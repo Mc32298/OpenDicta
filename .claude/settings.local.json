@@ -48,7 +48,8 @@
       "Skill(engineering:code-review:*)",
       "Bash(del \"C:\\\\Users\\\\MathiasNielsen-SPINO\\\\Downloads\\\\Projects\\\\VoiceNote_V5\\\\voicenote\\\\src\\\\windows\\\\settingsTypes.ts\")",
       "Skill(anthropic-skills:vibe-coding-expert)",
-      "Skill(anthropic-skills:vibe-coding-expert:*)"
+      "Skill(anthropic-skills:vibe-coding-expert:*)",
+      "Bash(cargo test *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\MathiasNielsen-SPINO\\AppData\\Roaming\\com.voicenote.app\\models\\parakeet"

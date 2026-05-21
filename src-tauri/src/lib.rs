@@ -1479,7 +1479,19 @@ fn model_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     model_dir_for(app, "parakeet")
 }
 
+/// A model id must be a plain identifier so a crafted value can't traverse out
+/// of the models directory (e.g. "../../other") and reach an arbitrary path in
+/// create_dir_all / remove_dir_all.
+fn is_valid_model_id(model_id: &str) -> bool {
+    !model_id.is_empty()
+        && model_id.len() <= 64
+        && model_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 fn model_dir_for(app: &AppHandle, model_id: &str) -> Result<std::path::PathBuf, String> {
+    if !is_valid_model_id(model_id) {
+        return Err("Invalid model id".to_string());
+    }
     app.path()
         .app_data_dir()
         .map(|p| p.join("models").join(model_id))
@@ -4091,6 +4103,36 @@ mod ai_settings_tests {
         assert!(AiProvider::from_settings_value("openai").is_some());
         assert!(AiProvider::from_settings_value("gemini").is_some());
         assert!(AiProvider::from_settings_value("other").is_none());
+    }
+
+    #[test]
+    fn model_id_validation_rejects_path_traversal_and_accepts_known_ids() {
+        // Real model ids resolve cleanly.
+        for id in [
+            "parakeet",
+            "canary_qwen_2_5b",
+            "whisper_small",
+            "whisper_large_v3_turbo",
+            "qwen3_asr",
+        ] {
+            assert!(is_valid_model_id(id), "expected {id} to be valid");
+        }
+
+        // Traversal / absolute / UNC / drive paths must be rejected before any
+        // filesystem operation in model_dir_for.
+        for id in [
+            "",
+            "../../evil",
+            "..",
+            "models/../../etc",
+            "/etc/passwd",
+            "\\\\server\\share",
+            "C:\\Windows",
+            "foo/bar",
+            "foo.bar",
+        ] {
+            assert!(!is_valid_model_id(id), "expected {id:?} to be rejected");
+        }
     }
 
     #[test]
