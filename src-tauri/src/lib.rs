@@ -1835,6 +1835,7 @@ async fn set_shortcut(
     if state.shortcut_push_to_talk.lock().unwrap().as_deref() == Some(shortcut.as_str())
         || state.shortcut_stop_discard.lock().unwrap().as_deref() == Some(shortcut.as_str())
         || state.shortcut_refine_ai.lock().unwrap().as_deref() == Some(shortcut.as_str())
+        || state.shortcut_quick_switcher.lock().unwrap().as_deref() == Some(shortcut.as_str())
     {
         return Err("That shortcut is already assigned to another action".to_string());
     }
