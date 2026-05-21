@@ -1046,7 +1046,7 @@ async fn set_active_model_id(
     save_app_settings(&app, state.inner().clone())?;
     if changed {
         // Restart the resident worker so the new model loads now, not after
-        // the next idle-offload. Mirrors set_provider's respawn pattern.
+        // the next idle-offload. Mirrors set_onnx_provider's respawn pattern.
         kill_sidecar(state.inner());
         spawn_sidecar(app.clone(), state.inner().clone());
     }
