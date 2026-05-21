@@ -70,11 +70,24 @@ Interaction:
 - Esc or window blur closes without applying.
 
 On select:
-- Model row → `invoke("set_active_model_id", { modelId })` (re-spawns the
-  sidecar with the new model in the background, same path the Models page uses).
+- Model row → `invoke("set_active_model_id", { modelId })`.
 - Style row → `invoke("set_ai_default_mode", { mode })`.
 - Then immediately `invoke("hide_quickswitch")` (or the window hides itself via
   `getCurrentWindow().hide()`), returning OS focus to the previous app.
+
+### Model switch must respawn the warm sidecar
+
+The transcription worker (sidecar) is prewarmed at app start and stays resident
+until an idle timeout. Today `set_active_model_id` only updates state and saves
+settings — it does **not** restart the sidecar — so a model change does not take
+effect until the worker idle-offloads and respawns. The palette (and the Models
+page's "hot-swap any time" claim) require the change to take effect immediately.
+
+Fix: `set_active_model_id` re-spawns the sidecar (`kill_sidecar` +
+`spawn_sidecar`, the same pattern `set_provider` already uses) **only when the
+model id actually changes**. Re-selecting the already-active model is a no-op
+(no needless reload). This corrects both the palette and the existing Models
+page behavior.
 
 ### Style id mapping note
 
@@ -110,9 +123,11 @@ imports the catalog directly.
 - **Undownloaded models:** hidden entirely (only `all_present` models listed).
   The active model is always downloaded, so the list is never empty of models.
 - **AI off:** style group shows only `raw`.
-- **Switch while recording:** no special handling — `set_active_model_id` is the
-  same command Settings uses; behavior is identical to switching from the
-  Models page.
+- **Switch while recording:** `set_active_model_id` only respawns the sidecar
+  when not busy is not required — `kill_sidecar`/`spawn_sidecar` are the same
+  primitives used elsewhere; behavior is identical to switching from the Models
+  page (which now also respawns). A switch landing mid-recording applies to the
+  next recording.
 
 ## Out of scope (YAGNI)
 
