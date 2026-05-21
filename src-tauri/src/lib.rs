@@ -36,6 +36,7 @@ const DEFAULT_SHORTCUT: &str = "Ctrl+-";
 const DEFAULT_PUSH_TO_TALK_SHORTCUT: &str = "F6";
 const DEFAULT_STOP_DISCARD_SHORTCUT: &str = "Esc";
 const DEFAULT_REFINE_AI_SHORTCUT: &str = "Ctrl+Shift+R";
+const DEFAULT_QUICK_SWITCHER_SHORTCUT: &str = "Ctrl+Shift+Space";
 
 /// Map the shortcut name (as produced by the frontend normalizeShortcutFromEvent)
 /// to a Win32 Virtual Key code for native GetAsyncKeyState polling.
@@ -111,6 +112,7 @@ struct AppState {
     shortcut_push_to_talk: Arc<Mutex<Option<String>>>,
     shortcut_stop_discard: Arc<Mutex<Option<String>>>,
     shortcut_refine_ai: Arc<Mutex<Option<String>>>,
+    shortcut_quick_switcher: Arc<Mutex<Option<String>>>,
     /// Signal to stop the native RightCtrl listener thread.
     right_ctrl_stop: Arc<AtomicBool>,
     /// True while native RightCtrl listener is active.
@@ -214,6 +216,9 @@ impl AppState {
             ))),
             shortcut_refine_ai: Arc::new(Mutex::new(Some(
                 DEFAULT_REFINE_AI_SHORTCUT.to_string(),
+            ))),
+            shortcut_quick_switcher: Arc::new(Mutex::new(Some(
+                DEFAULT_QUICK_SWITCHER_SHORTCUT.to_string(),
             ))),
             right_ctrl_stop: Arc::new(AtomicBool::new(false)),
             right_ctrl_active: Arc::new(AtomicBool::new(false)),
@@ -890,6 +895,7 @@ struct ShortcutBindings {
     push_to_talk: Option<String>,
     stop_and_discard: Option<String>,
     refine_with_ai: Option<String>,
+    quick_switcher: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -901,6 +907,8 @@ struct AppSettings {
     shortcut_stop_discard: String,
     #[serde(default = "default_refine_ai_shortcut")]
     shortcut_refine_ai: String,
+    #[serde(default = "default_quick_switcher_shortcut")]
+    shortcut_quick_switcher: String,
     mic_device: Option<String>,
     debug_mic_level: bool,
     #[serde(default = "default_waveform_color")]
@@ -953,6 +961,9 @@ fn default_stop_discard_shortcut() -> String {
 }
 fn default_refine_ai_shortcut() -> String {
     DEFAULT_REFINE_AI_SHORTCUT.to_string()
+}
+fn default_quick_switcher_shortcut() -> String {
+    DEFAULT_QUICK_SWITCHER_SHORTCUT.to_string()
 }
 
 fn default_active_model_id() -> String {
@@ -1228,6 +1239,7 @@ async fn get_shortcut_bindings(state: tauri::State<'_, SharedState>) -> Result<S
         push_to_talk: state.shortcut_push_to_talk.lock().unwrap().clone(),
         stop_and_discard: state.shortcut_stop_discard.lock().unwrap().clone(),
         refine_with_ai: state.shortcut_refine_ai.lock().unwrap().clone(),
+        quick_switcher: state.shortcut_quick_switcher.lock().unwrap().clone(),
     })
 }
 
@@ -1263,12 +1275,14 @@ async fn set_shortcut_binding(
             state.shortcut_push_to_talk.lock().unwrap().clone(),
             state.shortcut_stop_discard.lock().unwrap().clone(),
             state.shortcut_refine_ai.lock().unwrap().clone(),
+            state.shortcut_quick_switcher.lock().unwrap().clone(),
         ];
         let collides_other_action = match action.as_str() {
             "push_to_talk" => other_shortcuts
                 .iter()
-                .skip(1)
-                .flatten()
+                .enumerate()
+                .filter(|(i, _)| *i != 0)
+                .flat_map(|(_, v)| v.as_ref())
                 .any(|hk| hk == s),
             "stop_and_discard" => other_shortcuts
                 .iter()
@@ -1282,6 +1296,12 @@ async fn set_shortcut_binding(
                 .filter(|(i, _)| *i != 2)
                 .flat_map(|(_, v)| v.as_ref())
                 .any(|hk| hk == s),
+            "quick_switcher" => other_shortcuts
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != 3)
+                .flat_map(|(_, v)| v.as_ref())
+                .any(|hk| hk == s),
             _ => return Err(format!("Unknown shortcut action: {}", action)),
         };
         if collides_other_action {
@@ -1293,6 +1313,7 @@ async fn set_shortcut_binding(
         "push_to_talk" => state.shortcut_push_to_talk.clone(),
         "stop_and_discard" => state.shortcut_stop_discard.clone(),
         "refine_with_ai" => state.shortcut_refine_ai.clone(),
+        "quick_switcher" => state.shortcut_quick_switcher.clone(),
         _ => return Err(format!("Unknown shortcut action: {}", action)),
     };
 
@@ -2150,6 +2171,12 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
             .unwrap()
             .clone()
             .unwrap_or_default(),
+        shortcut_quick_switcher: state
+            .shortcut_quick_switcher
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default(),
         mic_device: state.mic_device.lock().unwrap().clone(),
         debug_mic_level: state.debug_mic_level.load(Ordering::SeqCst),
         waveform_color: state.waveform_color.lock().unwrap().clone(),
@@ -2200,6 +2227,11 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
         None
     } else {
         Some(settings.shortcut_refine_ai)
+    };
+    *state.shortcut_quick_switcher.lock().unwrap() = if settings.shortcut_quick_switcher.trim().is_empty() {
+        None
+    } else {
+        Some(settings.shortcut_quick_switcher)
     };
     *state.mic_device.lock().unwrap() = settings.mic_device;
     state
