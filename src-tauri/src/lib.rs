@@ -2809,10 +2809,12 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
 
     // 4. Resample from device rate to 16kHz (no-op if already 16kHz)
     let device_rate = *state.device_sample_rate.lock().unwrap();
-    let samples_16khz = resample_to_16khz(&samples, device_rate);
+    let mut samples_16khz = resample_to_16khz(&samples, device_rate);
 
     // 4b. Fast no-speech guard: skip worker call for extremely short or silent input.
     // This avoids getting stuck in "Transcribing..." when the user only tapped the key.
+    // The gate runs on the ORIGINAL signal — after normalization even silence
+    // would be boosted to the target level and always pass.
     let duration_sec = samples_16khz.len() as f32 / 16_000.0;
     let rms = if samples_16khz.is_empty() {
         0.0
@@ -2821,7 +2823,11 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
         (sum_sq / samples_16khz.len() as f32).sqrt()
     };
     let too_short = duration_sec < 0.20;
-    let too_quiet = rms < 0.008;
+    let too_quiet = rms < 0.002;
+
+    // Boost quiet/whispered speech toward a healthy level before saving the WAV.
+    // Runs after the gate so genuine silence is still rejected above.
+    normalize_audio(&mut samples_16khz);
     if too_short || too_quiet {
         *state.pending_transcript_meta.lock().unwrap() = None;
         let reason = if too_short {
