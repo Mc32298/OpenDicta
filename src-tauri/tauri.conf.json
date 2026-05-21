@@ -27,6 +27,21 @@
         "resizable": false,
         "visible": false,
         "center": true
+      },
+      {
+        "label": "quickswitch",
+        "url": "/?window=quickswitch",
+        "title": "OpenDicta Quick Switch",
+        "width": 380,
+        "height": 420,
+        "decorations": false,
+        "shadow": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "center": true
       }
     ],
     "security": {

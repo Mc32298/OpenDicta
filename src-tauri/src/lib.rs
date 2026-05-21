@@ -1175,6 +1175,12 @@ async fn get_voicebar_visible(state: tauri::State<'_, SharedState>) -> Result<bo
     Ok(state.voicebar_visible.load(Ordering::SeqCst))
 }
 
+#[tauri::command]
+async fn hide_quickswitch_cmd(app: AppHandle) -> Result<(), String> {
+    hide_quickswitch(&app);
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 struct OnboardingState {
     completed: bool,
@@ -2486,6 +2492,21 @@ fn hide_voicebar(app: &AppHandle) {
         // SAFETY: eval() string is hardcoded; no user input is interpolated here.
         let _ = win.eval("document.documentElement.removeAttribute('data-vb');");
         let _ = win.emit("voicebar-hide", ());
+    }
+}
+
+fn show_quickswitch(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("quickswitch") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        let _ = win.emit("quickswitch-show", ());
+    }
+}
+
+fn hide_quickswitch(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("quickswitch") {
+        let _ = win.emit("quickswitch-hide", ());
+        let _ = win.hide();
     }
 }
 
@@ -3831,6 +3852,11 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
         open_settings_page(&app, Some("style"));
         return;
     }
+    let quick_switcher = state.shortcut_quick_switcher.lock().unwrap().clone();
+    if quick_switcher.as_deref() == Some(shortcut.as_str()) {
+        show_quickswitch(&app);
+        return;
+    }
 
     let is_main_record = state.shortcut.lock().unwrap().as_str() == shortcut.as_str();
     let is_push_to_talk = push_to_talk.as_deref() == Some(shortcut.as_str());
@@ -3988,6 +4014,7 @@ fn setup_hotkey(app: &AppHandle, state: SharedState) -> Result<(), String> {
         state.shortcut_push_to_talk.lock().unwrap().clone(),
         state.shortcut_stop_discard.lock().unwrap().clone(),
         state.shortcut_refine_ai.lock().unwrap().clone(),
+        state.shortcut_quick_switcher.lock().unwrap().clone(),
     ] {
         if let Some(hk) = extra {
             if hk.trim().is_empty() {
@@ -4031,6 +4058,7 @@ pub fn run() {
             get_waveform_color,
             get_active_model_id,
             set_active_model_id,
+            hide_quickswitch_cmd,
             get_asr_model,
             get_asr_backend,
             get_runtime_profile,
