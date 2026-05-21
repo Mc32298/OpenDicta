@@ -2686,6 +2686,38 @@ fn start_audio_capture(
 
 // ─── M2: Audio Processing & WAV ──────────────────────────────────────────────
 
+/// Boost quiet recordings toward a healthy speech level so whispers and
+/// far-from-mic speech transcribe reliably. RMS-targeted with a capped gain
+/// (so silence isn't blown up into noise) and a hard limiter (so the boost
+/// can't introduce clipping). Pure and in-place. No-op on empty/silent input.
+fn normalize_audio(samples: &mut [f32]) {
+    const TARGET_RMS: f32 = 0.1;
+    const MAX_GAIN: f32 = 20.0;
+    const LIMIT: f32 = 0.97;
+
+    if samples.is_empty() {
+        return;
+    }
+
+    let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+    let rms = (sum_sq / samples.len() as f32).sqrt();
+    if rms <= 0.0 {
+        return;
+    }
+
+    let gain = (TARGET_RMS / rms).min(MAX_GAIN);
+    if gain <= 1.0 {
+        for s in samples.iter_mut() {
+            *s = s.clamp(-LIMIT, LIMIT);
+        }
+        return;
+    }
+
+    for s in samples.iter_mut() {
+        *s = (*s * gain).clamp(-LIMIT, LIMIT);
+    }
+}
+
 fn resample_to_16khz(samples: &[f32], from_rate: u32) -> Vec<f32> {
     if from_rate == 16_000 {
         return samples.to_vec();
@@ -4232,5 +4264,50 @@ mod ai_settings_tests {
 
         assert!(!matches);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn normalize_boosts_quiet_signal_toward_target() {
+        let mut samples = vec![0.01_f32; 16_000];
+        normalize_audio(&mut samples);
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        assert!(rms > 0.08 && rms <= 0.12, "rms after boost was {rms}");
+    }
+
+    #[test]
+    fn normalize_caps_gain_for_near_silent_signal() {
+        let mut samples = vec![0.00001_f32; 16_000];
+        normalize_audio(&mut samples);
+        let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+        assert!(peak <= 0.0002, "near-silent signal over-amplified: peak {peak}");
+    }
+
+    #[test]
+    fn normalize_never_clips_with_loud_transient() {
+        let mut samples = vec![0.02_f32; 16_000];
+        samples[0] = 1.0;
+        normalize_audio(&mut samples);
+        let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+        assert!(peak <= 0.97, "output clipped: peak {peak}");
+    }
+
+    #[test]
+    fn normalize_handles_empty_and_silent_buffers() {
+        let mut empty: Vec<f32> = vec![];
+        normalize_audio(&mut empty);
+
+        let mut silent = vec![0.0_f32; 1_000];
+        normalize_audio(&mut silent);
+        assert!(silent.iter().all(|s| s.is_finite() && *s == 0.0));
+    }
+
+    #[test]
+    fn normalize_does_not_amplify_already_loud_signal() {
+        let mut samples = vec![0.3_f32; 16_000];
+        normalize_audio(&mut samples);
+        let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+        assert!(peak <= 0.97);
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        assert!(rms <= 0.31, "already-loud signal was amplified: rms {rms}");
     }
 }
