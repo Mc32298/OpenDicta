@@ -37,8 +37,36 @@ const DEFAULT_PUSH_TO_TALK_SHORTCUT: &str = "F6";
 const DEFAULT_STOP_DISCARD_SHORTCUT: &str = "Esc";
 const DEFAULT_REFINE_AI_SHORTCUT: &str = "Ctrl+Shift+R";
 
+/// Map the shortcut name (as produced by the frontend normalizeShortcutFromEvent)
+/// to a Win32 Virtual Key code for native GetAsyncKeyState polling.
+/// Returns None for combos like "Ctrl+F" — those go through Tauri's global_shortcut API.
 #[cfg(target_os = "windows")]
-const VK_RCONTROL_CODE: i32 = 0xA3;
+fn native_vk_code(hotkey: &str) -> Option<i32> {
+    match hotkey {
+        "ControlRight" => Some(0xA3), // VK_RCONTROL
+        "ControlLeft"  => Some(0xA2), // VK_LCONTROL
+        "ShiftRight"   => Some(0xA1), // VK_RSHIFT
+        "ShiftLeft"    => Some(0xA0), // VK_LSHIFT
+        "AltRight"     => Some(0xA5), // VK_RMENU
+        "AltLeft"      => Some(0xA4), // VK_LMENU
+        "MetaRight"    => Some(0x5C), // VK_RWIN
+        "MetaLeft"     => Some(0x5B), // VK_LWIN
+        "CapsLock"     => Some(0x14), // VK_CAPITAL
+        "F1"           => Some(0x70),
+        "F2"           => Some(0x71),
+        "F3"           => Some(0x72),
+        "F4"           => Some(0x73),
+        "F5"           => Some(0x74),
+        "F6"           => Some(0x75),
+        "F7"           => Some(0x76),
+        "F8"           => Some(0x77),
+        "F9"           => Some(0x78),
+        "F10"          => Some(0x79),
+        "F11"          => Some(0x7A),
+        "F12"          => Some(0x7B),
+        _              => None,
+    }
+}
 
 // ─── App State ────────────────────────────────────────────────────────────────
 //
@@ -145,6 +173,8 @@ struct AppState {
     anthropic_api_key: Arc<Mutex<Option<String>>>,
     /// Target language for translate/clean_translate presets
     ai_target_language: Arc<Mutex<String>>,
+    /// STT transcription language passed to the worker ("en", "es", "de", … or "auto")
+    stt_language: Arc<Mutex<String>>,
     /// Shared HTTP client for AI provider requests (reqwest is cheap to clone)
     http_client: reqwest::Client,
 }
@@ -218,6 +248,7 @@ impl AppState {
             gemini_api_key: Arc::new(Mutex::new(None)),
             anthropic_api_key: Arc::new(Mutex::new(None)),
             ai_target_language: Arc::new(Mutex::new(String::new())),
+            stt_language: Arc::new(Mutex::new("en".to_string())),
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -902,10 +933,15 @@ struct AppSettings {
     ai_ollama_url: String,
     #[serde(default)]
     ai_target_language: String,
+    #[serde(default = "default_stt_language")]
+    stt_language: String,
     #[serde(default = "default_typing_baseline_wpm")]
     typing_baseline_wpm: u32,
 }
 
+fn default_stt_language() -> String {
+    "en".to_string()
+}
 fn default_waveform_color() -> String {
     "#3082ff".to_string()
 }
@@ -1005,8 +1041,15 @@ async fn set_active_model_id(
     if !valid.contains(&model_id.as_str()) {
         return Err(format!("Unknown model id: {}", model_id));
     }
+    let changed = *state.active_model_id.lock().unwrap() != model_id;
     *state.active_model_id.lock().unwrap() = model_id;
     save_app_settings(&app, state.inner().clone())?;
+    if changed {
+        // Restart the resident worker so the new model loads now, not after
+        // the next idle-offload. Mirrors set_provider's respawn pattern.
+        kill_sidecar(state.inner());
+        spawn_sidecar(app.clone(), state.inner().clone());
+    }
     Ok(())
 }
 
@@ -1164,7 +1207,7 @@ async fn get_shortcut_status(
     state: tauri::State<'_, SharedState>,
 ) -> Result<ShortcutStatus, String> {
     let shortcut = state.shortcut.lock().unwrap().clone();
-    let registered = if uses_native_right_ctrl(shortcut.as_str()) {
+    let registered = if uses_native_key_hook(shortcut.as_str()) {
         state.right_ctrl_active.load(Ordering::SeqCst)
     } else {
         app.global_shortcut().is_registered(shortcut.as_str())
@@ -2124,6 +2167,7 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         ai_model: state.ai_model.lock().unwrap().clone(),
         ai_ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
         ai_target_language: state.ai_target_language.lock().unwrap().clone(),
+        stt_language: state.stt_language.lock().unwrap().clone(),
         typing_baseline_wpm: *state.typing_baseline_wpm.lock().unwrap(),
     };
     let payload = serde_json::to_string(&settings)
@@ -2168,6 +2212,7 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     *state.runtime_profile.lock().unwrap() = settings.runtime_profile;
     *state.onnx_provider.lock().unwrap() = settings.onnx_provider;
     *state.ai_target_language.lock().unwrap() = settings.ai_target_language;
+    *state.stt_language.lock().unwrap() = settings.stt_language;
     let keyring_token = load_hf_token_secret();
     *state.hf_token.lock().unwrap() = keyring_token.clone().or(settings.hf_token.clone());
     let openai_entry = openai_keyring_entry();
@@ -2998,6 +3043,24 @@ fn finish_transcript_request(state: &SharedState) {
     }
 }
 
+#[tauri::command]
+async fn get_stt_language(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    Ok(state.stt_language.lock().unwrap().clone())
+}
+
+#[tauri::command]
+async fn set_stt_language(
+    language: String,
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<(), String> {
+    *state.stt_language.lock().unwrap() = language;
+    save_app_settings(&app, state.inner().clone())?;
+    kill_sidecar(state.inner());
+    spawn_sidecar(app.clone(), state.inner().clone());
+    Ok(())
+}
+
 fn spawn_sidecar(app: AppHandle, state: SharedState) {
     // Atomically claim the spawn slot. If another thread already claimed it, bail.
     if state
@@ -3036,10 +3099,12 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
         .into_owned();
 
     let mut command = std::process::Command::new(&program);
+    let stt_language = state.stt_language.lock().unwrap().clone();
     command
         .env("OpenDicta_PROVIDER", &provider)
         .env("OpenDicta_MODEL_ID", &model_id)
         .env("OpenDicta_MODEL_DIR", &model_dir)
+        .env("OpenDicta_LANGUAGE", &stt_language)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -3642,8 +3707,8 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 // Released → stop capture, transcribe, paste
 
 fn register_hotkey(app: &AppHandle, state: SharedState, hotkey: &str) -> Result<(), String> {
-    if uses_native_right_ctrl(hotkey) {
-        return register_right_ctrl_native(app, state, hotkey);
+    if uses_native_key_hook(hotkey) {
+        return register_native_key(app, state, hotkey);
     }
 
     let app_on_press = app.clone();
@@ -3678,12 +3743,15 @@ fn register_hotkey(app: &AppHandle, state: SharedState, hotkey: &str) -> Result<
     Ok(())
 }
 
-fn uses_native_right_ctrl(hotkey: &str) -> bool {
-    hotkey.eq_ignore_ascii_case("ControlRight")
+fn uses_native_key_hook(hotkey: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    { native_vk_code(hotkey).is_some() }
+    #[cfg(not(target_os = "windows"))]
+    { let _ = hotkey; false }
 }
 
 fn hotkey_is_registered(app: &AppHandle, state: &SharedState, hotkey: &str) -> bool {
-    if uses_native_right_ctrl(hotkey) {
+    if uses_native_key_hook(hotkey) {
         state.right_ctrl_active.load(Ordering::SeqCst)
     } else {
         app.global_shortcut().is_registered(hotkey)
@@ -3691,7 +3759,7 @@ fn hotkey_is_registered(app: &AppHandle, state: &SharedState, hotkey: &str) -> b
 }
 
 fn unregister_hotkey(app: &AppHandle, state: SharedState, hotkey: &str) -> Result<(), String> {
-    if uses_native_right_ctrl(hotkey) {
+    if uses_native_key_hook(hotkey) {
         state.right_ctrl_stop.store(true, Ordering::SeqCst);
         state.right_ctrl_active.store(false, Ordering::SeqCst);
         return Ok(());
@@ -3816,11 +3884,14 @@ fn handle_shortcut_released(app: AppHandle, state: SharedState, shortcut: String
 }
 
 #[cfg(target_os = "windows")]
-fn register_right_ctrl_native(
+fn register_native_key(
     app: &AppHandle,
     state: SharedState,
     hotkey: &str,
 ) -> Result<(), String> {
+    let vk_code = native_vk_code(hotkey)
+        .ok_or_else(|| format!("No Win32 VK code mapping for shortcut '{}'", hotkey))?;
+
     state.right_ctrl_stop.store(false, Ordering::SeqCst);
     state.right_ctrl_active.store(true, Ordering::SeqCst);
 
@@ -3834,10 +3905,9 @@ fn register_right_ctrl_native(
             if state_on_key.right_ctrl_stop.load(Ordering::SeqCst) {
                 break;
             }
-            // SAFETY: GetAsyncKeyState is a pure Win32 query function and does not require
-            // additional invariants for this usage.
+            // SAFETY: GetAsyncKeyState is a pure Win32 query — no additional invariants needed.
             let pressed = unsafe {
-                windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(VK_RCONTROL_CODE)
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk_code)
             } < 0;
             if pressed && !was_pressed {
                 handle_shortcut_pressed(app_on_key.clone(), state_on_key.clone(), shortcut.clone());
@@ -3851,21 +3921,19 @@ fn register_right_ctrl_native(
             was_pressed = pressed;
             std::thread::sleep(std::time::Duration::from_millis(12));
         }
-        state_on_key
-            .right_ctrl_active
-            .store(false, Ordering::SeqCst);
+        state_on_key.right_ctrl_active.store(false, Ordering::SeqCst);
     });
 
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn register_right_ctrl_native(
+fn register_native_key(
     _app: &AppHandle,
     _state: SharedState,
-    _hotkey: &str,
+    hotkey: &str,
 ) -> Result<(), String> {
-    Err("ControlRight-only shortcut is only supported on Windows in this build".to_string())
+    Err(format!("Native key hook for '{}' is only supported on Windows in this build", hotkey))
 }
 
 fn setup_hotkey(app: &AppHandle, state: SharedState) -> Result<(), String> {
@@ -3980,6 +4048,8 @@ pub fn run() {
             set_ai_model,
             set_ai_ollama_url,
             test_ai_connection,
+            get_stt_language,
+            set_stt_language,
         ])
         .setup(move |app| {
             // Hide from macOS Dock — we're a menu bar app
