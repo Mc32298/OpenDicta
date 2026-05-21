@@ -5,7 +5,7 @@ import {
   MicIcon, CheckIcon, MailIcon, CodeIcon, BriefcaseIcon, ListIcon,
   ChatIcon, SparkleIcon, LockSolidIcon,
 } from "../ui/icons";
-import { STYLE_CATALOG, catalogName } from "../lib/catalog";
+import { STYLE_CATALOG } from "../lib/catalog";
 
 const STYLE_META: Record<string, { desc: string; Ico: typeof MicIcon }> = {
   raw:     { desc: "Verbatim. Nothing changed. No AI processing.", Ico: MicIcon },
@@ -18,12 +18,10 @@ const STYLE_META: Record<string, { desc: string; Ico: typeof MicIcon }> = {
   summary: { desc: "Compresses to 3-5 sentences.",                 Ico: SparkleIcon },
 };
 
-const STYLES = STYLE_CATALOG.map((c) => ({
-  id: c.id,
-  name: catalogName(STYLE_CATALOG, c.id),
-  desc: STYLE_META[c.id].desc,
-  Ico: STYLE_META[c.id].Ico,
-}));
+const STYLES = STYLE_CATALOG.map((c) => {
+  const meta = STYLE_META[c.id] ?? { desc: "", Ico: MicIcon };
+  return { id: c.id, name: c.name, desc: meta.desc, Ico: meta.Ico };
+});
 
 export default function Style({ aiEnabled }: { aiEnabled: boolean }) {
   const [selected, setSelected] = useState("grammar");
