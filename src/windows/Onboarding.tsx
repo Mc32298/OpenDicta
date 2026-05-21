@@ -32,6 +32,7 @@ type DownloadProgressEvent = {
 const STEP_STATUS: Array<{ tone: "info" | "warn"; text: string }> = [
   { tone: "info", text: "Welcome. Let’s configure your setup." },
   { tone: "info", text: "Choose the shortcuts you want to use." },
+  { tone: "info", text: "Tell us how fast you type so we can track time saved." },
   { tone: "info", text: "Install the local model required for transcription." },
 ];
 
@@ -48,6 +49,7 @@ export default function Onboarding() {
   const [shortcut, setShortcut] = useState(DEFAULT_SHORTCUT);
   const [pushToTalkShortcut, setPushToTalkShortcut] = useState("F6");
   const [userName, setUserName] = useState("");
+  const [wpm, setWpm] = useState(40);
   const [modelInstalled, setModelInstalled] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
 
@@ -183,7 +185,15 @@ export default function Onboarding() {
       setUserName(trimmedName);
       setStatus({ tone: "ok", text: `Nice to meet you, ${trimmedName}.` });
     }
-    setStep((s) => Math.min(2, s + 1));
+    if (step === 2) {
+      try {
+        await invoke("set_typing_baseline_wpm", { value: wpm });
+      } catch (e) {
+        setStatus({ tone: "err", text: `Failed to save WPM: ${String(e)}` });
+        return;
+      }
+    }
+    setStep((s) => Math.min(3, s + 1));
   };
 
   if (loading) {
@@ -198,11 +208,12 @@ export default function Onboarding() {
             <div className="wv-chrome-title">OpenDicta Setup</div>
             <button type="button" className="wv-btn wv-btn-ghost" onClick={() => void getCurrentWindow().hide()}>Close</button>
           </div>
-          <div className="wv-onboarding-step">Step {step + 1} of 3</div>
+          <div className="wv-onboarding-step">Step {step + 1} of 4</div>
           <h1>
             {step === 0 && "Welcome"}
             {step === 1 && "Choose Shortcuts"}
-            {step === 2 && "Install Model"}
+            {step === 2 && "Your Typing Speed"}
+            {step === 3 && "Install Model"}
           </h1>
           {step === 0 && (
             <div className="wv-inline wv-inline-stack">
@@ -248,6 +259,40 @@ export default function Onboarding() {
           )}
           {step === 2 && (
             <div className="wv-inline wv-inline-stack">
+              <p>We use this to calculate how much time you save by speaking instead of typing.</p>
+              <label className="wv-field">
+                <span className="wv-field-label">Average typing speed (WPM)</span>
+                <input
+                  className="wv-input"
+                  type="number"
+                  min={10}
+                  max={300}
+                  value={wpm}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (!isNaN(v)) setWpm(Math.min(300, Math.max(10, v)));
+                  }}
+                  autoFocus
+                />
+              </label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[30, 40, 55, 70, 90].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    className={"wv-btn wv-btn-ghost" + (wpm === preset ? " wv-btn-active" : "")}
+                    style={{ padding: "4px 12px", fontSize: 13 }}
+                    onClick={() => setWpm(preset)}
+                  >
+                    {preset} wpm
+                  </button>
+                ))}
+              </div>
+              <span className="wv-note">Not sure? The average is around 40 wpm. You can always change it later in Settings.</span>
+            </div>
+          )}
+          {step === 3 && (
+            <div className="wv-inline wv-inline-stack">
               <p>Install Parakeet V3, the default local speech model for transcription.</p>
               <StatusBadge tone={modelInstalled ? "ok" : "warn"}>
                 {modelInstalled ? "Ready" : "Required"}
@@ -274,10 +319,10 @@ export default function Onboarding() {
 
           <div className="wv-onboarding-actions">
             <Button variant="ghost" disabled={step === 0 || busy} onClick={() => setStep((s) => Math.max(0, s - 1))}>Back</Button>
-            {step < 2 && (
+            {step < 3 && (
               <Button variant="primary" disabled={busy || (step === 0 && !userName.trim())} onClick={() => void next()}>Next</Button>
             )}
-            {step === 2 && (
+            {step === 3 && (
               <Button variant="primary" disabled={busy || !modelInstalled} onClick={() => void finish()}>Finish</Button>
             )}
           </div>

@@ -75,11 +75,17 @@ fn load_canary(
     check_files(dir, &["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"])?;
 
     let mut config = OfflineRecognizerConfig::default();
+    let raw_lang = std::env::var("OpenDicta_LANGUAGE").unwrap_or_else(|_| "en".to_string());
+    let canary_lang = if ["en", "de", "es", "fr"].contains(&raw_lang.as_str()) {
+        raw_lang
+    } else {
+        "en".to_string()
+    };
     config.model_config.canary = OfflineCanaryModelConfig {
         encoder: Some(dir.join("encoder.int8.onnx").to_string_lossy().into_owned()),
         decoder: Some(dir.join("decoder.int8.onnx").to_string_lossy().into_owned()),
-        src_lang: Some("en".to_string()),
-        tgt_lang: Some("en".to_string()),
+        src_lang: Some(canary_lang.clone()),
+        tgt_lang: Some(canary_lang),
         use_pnc: false,
     };
     config.model_config.tokens = Some(dir.join("tokens.txt").to_string_lossy().into_owned());
@@ -123,11 +129,12 @@ fn load_whisper(
 
     check_files(dir, &[encoder_name, decoder_name, tokens_name])?;
 
+    let lang = std::env::var("OpenDicta_LANGUAGE").unwrap_or_else(|_| "en".to_string());
     let mut config = OfflineRecognizerConfig::default();
     let mut whisper = OfflineWhisperModelConfig::default();
     whisper.encoder = Some(dir.join(encoder_name).to_string_lossy().into_owned());
     whisper.decoder = Some(dir.join(decoder_name).to_string_lossy().into_owned());
-    whisper.language = Some("en".to_string());
+    whisper.language = if lang == "auto" { None } else { Some(lang) };
     whisper.task = Some("transcribe".to_string());
     config.model_config.whisper = whisper;
     config.model_config.tokens = Some(dir.join(tokens_name).to_string_lossy().into_owned());

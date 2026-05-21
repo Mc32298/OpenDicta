@@ -25,9 +25,42 @@ export default function QuickSwitch() {
   const [rows, setRows] = useState<Row[]>([]);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const searchRef = useRef<HTMLDivElement>(null);
+  const clearTimerRef = useRef<number[]>([]);
+
+  function clearPendingSearchResets() {
+    for (const timer of clearTimerRef.current) {
+      window.clearTimeout(timer);
+    }
+    clearTimerRef.current = [];
+  }
+
+  function resetSearch() {
+    setQuery("");
+    setHighlight(0);
+  }
+
+  function focusBlankSearch() {
+    clearPendingSearchResets();
+    resetSearch();
+    const clearInput = () => {
+      searchRef.current?.focus();
+    };
+    window.requestAnimationFrame(clearInput);
+    for (const delay of [0, 25, 75, 150, 300]) {
+      const timer = window.setTimeout(clearInput, delay);
+      clearTimerRef.current.push(timer);
+    }
+  }
+
+  function closePalette() {
+    resetSearch();
+    void invoke("hide_quickswitch_cmd");
+  }
 
   async function loadData() {
+    resetSearch();
+
     // Models: keep only downloaded ones.
     const activeModel = await invoke<string>("get_active_model_id").catch(() => "");
     const modelRows: Row[] = [];
@@ -47,28 +80,58 @@ export default function QuickSwitch() {
     }));
 
     setRows([...modelRows, ...styleRows]);
-    setQuery("");
-    setHighlight(0);
   }
 
   // Reload + focus every time the window is shown.
   useEffect(() => {
     void loadData();
-    inputRef.current?.focus();
-    const un = listen("quickswitch-show", () => {
+    focusBlankSearch();
+    const unlistenShow = listen("quickswitch-show", () => {
+      focusBlankSearch();
       void loadData();
-      inputRef.current?.focus();
     });
-    return () => { void un.then((f) => f()); };
+    const unlistenHide = listen("quickswitch-hide", () => {
+      resetSearch();
+    });
+    return () => {
+      clearPendingSearchResets();
+      void unlistenShow.then((f) => f());
+      void unlistenHide.then((f) => f());
+    };
   }, []);
 
   // Close when the window loses focus (click-away).
   useEffect(() => {
     const win = getCurrentWindow();
     const un = win.onFocusChanged(({ payload: focused }) => {
-      if (!focused) void invoke("hide_quickswitch_cmd");
+      if (focused) {
+        focusBlankSearch();
+        void loadData();
+      } else {
+        closePalette();
+      }
     });
     return () => { void un.then((f) => f()); };
+  }, []);
+
+  useEffect(() => {
+    const unlistenActiveModel = listen<string>("active-model-changed", (event) => {
+      setRows((current) => current.map((row) => (
+        row.kind === "model" ? { ...row, active: row.id === event.payload } : row
+      )));
+    });
+
+    const unlistenActiveStyle = listen<string>("ai-default-mode-changed", (event) => {
+      const activeStyle = mapMode(event.payload);
+      setRows((current) => current.map((row) => (
+        row.kind === "style" ? { ...row, active: row.id === activeStyle } : row
+      )));
+    });
+
+    return () => {
+      void unlistenActiveModel.then((f) => f());
+      void unlistenActiveStyle.then((f) => f());
+    };
   }, []);
 
   const filtered = useMemo(() => {
@@ -83,18 +146,28 @@ export default function QuickSwitch() {
   }, [filtered.length]);
 
   async function applyRow(row: Row) {
-    if (row.kind === "model") {
-      await invoke("set_active_model_id", { modelId: row.id }).catch(console.error);
-    } else {
-      await invoke("set_ai_default_mode", { mode: row.id }).catch(console.error);
+    try {
+      if (row.kind === "model") {
+        await invoke("set_active_model_id", { modelId: row.id });
+        setRows((current) => current.map((candidate) => (
+          candidate.kind === "model" ? { ...candidate, active: candidate.id === row.id } : candidate
+        )));
+      } else {
+        await invoke("set_ai_default_mode", { mode: row.id });
+        setRows((current) => current.map((candidate) => (
+          candidate.kind === "style" ? { ...candidate, active: candidate.id === row.id } : candidate
+        )));
+      }
+      closePalette();
+    } catch (err) {
+      console.error(err);
     }
-    await invoke("hide_quickswitch_cmd").catch(() => {});
   }
 
-  function onKeyDown(e: React.KeyboardEvent) {
+  function onKeyDown(e: { key: string; preventDefault: () => void }) {
     if (e.key === "Escape") {
       e.preventDefault();
-      void invoke("hide_quickswitch_cmd");
+      closePalette();
       return;
     }
     if (e.key === "ArrowDown") {
@@ -114,17 +187,49 @@ export default function QuickSwitch() {
     }
   }
 
+  function onSearchKeyDown(e: KeyboardEvent) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "Backspace") {
+      e.preventDefault();
+      setQuery((q) => q.slice(0, -1));
+      setHighlight(0);
+      return;
+    }
+    if (e.key === "Delete") {
+      e.preventDefault();
+      resetSearch();
+      return;
+    }
+    if (e.key === " " && query.length === 0) {
+      e.preventDefault();
+      return;
+    }
+    if (e.key.length === 1) {
+      e.preventDefault();
+      setQuery((q) => q + e.key);
+      setHighlight(0);
+    }
+  }
+
+  // Handle keys even when focus has moved from the input to a result row.
+  useEffect(() => {
+    const onWindowKeyDown = (e: KeyboardEvent) => {
+      onKeyDown(e);
+      onSearchKeyDown(e);
+    };
+    window.addEventListener("keydown", onWindowKeyDown, true);
+    return () => window.removeEventListener("keydown", onWindowKeyDown, true);
+  }, [filtered, highlight, query]);
+
   return (
     <div className="qs-root">
-      <input
-        ref={inputRef}
-        className="qs-search"
-        placeholder="Switch model or style…"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        onKeyDown={onKeyDown}
-        autoFocus
-      />
+      <div
+        ref={searchRef}
+        className={"qs-search qs-search-display" + (query ? "" : " qs-search-empty")}
+        tabIndex={0}
+      >
+        {query || "Switch model or style..."}
+      </div>
       <div className="qs-list">
         {filtered.length === 0 && <div className="qs-empty">No matches</div>}
         {filtered.map((row, i) => (

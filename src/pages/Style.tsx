@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import PageHead from "./PageHead";
 import {
   MicIcon, CheckIcon, MailIcon, CodeIcon, BriefcaseIcon, ListIcon,
@@ -23,20 +24,32 @@ const STYLES = STYLE_CATALOG.map((c) => {
   return { id: c.id, name: c.name, desc: meta.desc, Ico: meta.Ico };
 });
 
+function mapModeToStyle(mode: string): string {
+  return mode === "clean" ? "grammar" :
+    mode === "translate" ? "summary" :
+    mode === "clean_translate" ? "grammar" :
+    mode;
+}
+
 export default function Style({ aiEnabled }: { aiEnabled: boolean }) {
   const [selected, setSelected] = useState("grammar");
 
   useEffect(() => {
     invoke<string>("get_ai_default_mode")
       .then((mode) => {
-        const mapped =
-          mode === "clean" ? "grammar" :
-          mode === "translate" ? "summary" :
-          mode === "clean_translate" ? "grammar" :
-          mode;
+        const mapped = mapModeToStyle(mode);
         if (STYLES.some((s) => s.id === mapped)) setSelected(mapped);
       })
       .catch(console.error);
+
+    const unlistenMode = listen<string>("ai-default-mode-changed", (event) => {
+      const mapped = mapModeToStyle(event.payload);
+      if (STYLES.some((s) => s.id === mapped)) setSelected(mapped);
+    });
+
+    return () => {
+      void unlistenMode.then((fn) => fn());
+    };
   }, []);
 
   async function chooseStyle(id: string) {

@@ -26,7 +26,7 @@ use std::sync::{
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
+    AppHandle, Emitter, Manager, Url,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_autostart::ManagerExt as _;
@@ -67,6 +67,20 @@ fn native_vk_code(hotkey: &str) -> Option<i32> {
         "F12"          => Some(0x7B),
         _              => None,
     }
+}
+
+fn is_modifier_only_shortcut(hotkey: &str) -> bool {
+    matches!(
+        hotkey,
+        "ControlRight"
+            | "ControlLeft"
+            | "ShiftLeft"
+            | "ShiftRight"
+            | "AltLeft"
+            | "AltRight"
+            | "MetaLeft"
+            | "MetaRight"
+    )
 }
 
 // ─── App State ────────────────────────────────────────────────────────────────
@@ -504,8 +518,13 @@ async fn set_ai_default_mode(
     if !VALID.contains(&mode.as_str()) {
         return Err(format!("Unknown mode: {}", mode));
     }
-    *state.ai_default_mode.lock().unwrap() = mode;
-    save_app_settings(&app, state.inner().clone())
+    let changed = *state.ai_default_mode.lock().unwrap() != mode;
+    *state.ai_default_mode.lock().unwrap() = mode.clone();
+    save_app_settings(&app, state.inner().clone())?;
+    if changed {
+        let _ = app.emit("ai-default-mode-changed", mode);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1053,9 +1072,10 @@ async fn set_active_model_id(
         return Err(format!("Unknown model id: {}", model_id));
     }
     let changed = *state.active_model_id.lock().unwrap() != model_id;
-    *state.active_model_id.lock().unwrap() = model_id;
+    *state.active_model_id.lock().unwrap() = model_id.clone();
     save_app_settings(&app, state.inner().clone())?;
     if changed {
+        let _ = app.emit("active-model-changed", model_id);
         // Restart the resident worker so the new model loads now, not after
         // the next idle-offload. Mirrors set_onnx_provider's respawn pattern.
         kill_sidecar(state.inner());
@@ -1273,6 +1293,12 @@ async fn set_shortcut_binding(
         if s.len() > 64 {
             return Err("Shortcut too long".to_string());
         }
+        if is_modifier_only_shortcut(s) {
+            return Err(
+                "Modifier-only shortcuts are not supported here. Use a non-modifier key or a combo like Ctrl+Shift+Space."
+                    .to_string(),
+            );
+        }
         let main_shortcut = state.shortcut.lock().unwrap().clone();
         if s == &main_shortcut {
             return Err("That shortcut is already used by Record toggle".to_string());
@@ -1337,6 +1363,16 @@ async fn set_shortcut_binding(
                 let _ = register_hotkey(&app, state.inner().clone(), old_hk);
             }
             return Err(e);
+        }
+        if !hotkey_is_registered(&app, state.inner(), new_hk) {
+            let _ = unregister_hotkey(&app, state.inner().clone(), new_hk);
+            if let Some(ref old_hk) = old {
+                let _ = register_hotkey(&app, state.inner().clone(), old_hk);
+            }
+            return Err(format!(
+                "Shortcut '{}' could not be activated on this system",
+                new_hk
+            ));
         }
     }
 
@@ -2235,11 +2271,14 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     } else {
         Some(settings.shortcut_refine_ai)
     };
-    *state.shortcut_quick_switcher.lock().unwrap() = if settings.shortcut_quick_switcher.trim().is_empty() {
-        None
-    } else {
-        Some(settings.shortcut_quick_switcher)
-    };
+    *state.shortcut_quick_switcher.lock().unwrap() =
+        if settings.shortcut_quick_switcher.trim().is_empty() {
+            None
+        } else if is_modifier_only_shortcut(settings.shortcut_quick_switcher.trim()) {
+            Some(DEFAULT_QUICK_SWITCHER_SHORTCUT.to_string())
+        } else {
+            Some(settings.shortcut_quick_switcher)
+        };
     *state.mic_device.lock().unwrap() = settings.mic_device;
     state
         .debug_mic_level
@@ -2497,6 +2536,10 @@ fn hide_voicebar(app: &AppHandle) {
 
 fn show_quickswitch(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("quickswitch") {
+        let url = format!("tauri://localhost/?window=quickswitch&open={}", now_millis());
+        if let Ok(url) = Url::parse(&url) {
+            let _ = win.navigate(url);
+        }
         let _ = win.show();
         let _ = win.set_focus();
         let _ = win.emit("quickswitch-show", ());
@@ -2508,6 +2551,12 @@ fn hide_quickswitch(app: &AppHandle) {
         let _ = win.emit("quickswitch-hide", ());
         let _ = win.hide();
     }
+}
+
+fn quickswitch_is_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("quickswitch")
+        .and_then(|win| win.is_visible().ok())
+        .unwrap_or(false)
 }
 
 fn open_settings(app: &AppHandle) {
@@ -3831,13 +3880,14 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
         return;
     }
     println!("Shortcut pressed: {}", shortcut);
-    let _ = app.emit(
-        "shortcut-triggered",
-        serde_json::json!({ "state": "pressed", "shortcut": shortcut }),
-    );
     let push_to_talk = state.shortcut_push_to_talk.lock().unwrap().clone();
     let stop_and_discard = state.shortcut_stop_discard.lock().unwrap().clone();
     let refine_with_ai = state.shortcut_refine_ai.lock().unwrap().clone();
+
+    if shortcut == "Esc" && quickswitch_is_visible(&app) {
+        hide_quickswitch(&app);
+        return;
+    }
 
     if stop_and_discard.as_deref() == Some(shortcut.as_str()) {
         if state.recording.load(Ordering::SeqCst) {
@@ -3863,6 +3913,11 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
     if !(is_main_record || is_push_to_talk) {
         return;
     }
+
+    let _ = app.emit(
+        "shortcut-triggered",
+        serde_json::json!({ "state": "pressed", "shortcut": shortcut }),
+    );
 
     if is_main_record && state.recording.load(Ordering::SeqCst) {
         state.sidecar_busy.store(true, Ordering::SeqCst);
@@ -4263,6 +4318,15 @@ mod ai_settings_tests {
         assert_eq!((min_width, min_height), (1040.0, 820.0));
         assert!(width >= min_width);
         assert!(height >= min_height);
+    }
+
+    #[test]
+    fn modifier_only_shortcut_detection_matches_supported_policy() {
+        assert!(is_modifier_only_shortcut("ShiftLeft"));
+        assert!(is_modifier_only_shortcut("ControlRight"));
+        assert!(!is_modifier_only_shortcut("F6"));
+        assert!(!is_modifier_only_shortcut("Ctrl+Shift+Space"));
+        assert!(!is_modifier_only_shortcut("M"));
     }
 
     #[test]

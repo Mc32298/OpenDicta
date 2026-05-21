@@ -15,7 +15,7 @@ export const PREFS_KEY = "voicenote.prefs.v1";
 
 export const DEFAULT_PREFS: Prefs = {
   accent: "#dbef6a",
-  density: "regular",
+  density: "compact",
   sidebar: "icons",
   userName: "Alex",
   aiEnabled: true,
@@ -40,7 +40,8 @@ function loadPrefs(): Prefs {
     const raw = localStorage.getItem(PREFS_KEY);
     if (!raw) return { ...DEFAULT_PREFS };
     const parsed = JSON.parse(raw) as Partial<Prefs>;
-    return { ...DEFAULT_PREFS, ...parsed };
+    const { density: _ignored, ...rest } = parsed;
+    return { ...DEFAULT_PREFS, ...rest };
   } catch {
     return { ...DEFAULT_PREFS };
   }

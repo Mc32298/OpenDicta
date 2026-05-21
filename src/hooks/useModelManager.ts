@@ -121,9 +121,14 @@ export function useModelManagerState(): ModelManagerValue {
       }
     });
 
+    const unlistenActiveModel = listen<string>("active-model-changed", (event) => {
+      setActiveModelId(event.payload);
+    });
+
     return () => {
       void unlistenProgress.then((fn) => fn());
       void unlistenComplete.then((fn) => fn());
+      void unlistenActiveModel.then((fn) => fn());
     };
   }, [patchStatus, refreshStatus]);
 

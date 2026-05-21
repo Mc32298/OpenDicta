@@ -5,6 +5,7 @@ import PageHead from "./PageHead";
 import { normalizeShortcutFromEvent } from "../lib/shortcutUtils";
 import { THEMES, usePrefs } from "../shell/prefs";
 import type { Prefs } from "../shell/prefs";
+import { useToast } from "../ui/toast";
 import {
   CheckIcon, DiagnosticIcon, PowerIcon, DashboardIcon, ModelsIcon,
   WaveIcon, MicIcon, SparkleIcon,
@@ -21,6 +22,7 @@ type ShortcutBindings = {
   push_to_talk: string | null;
   stop_and_discard: string | null;
   refine_with_ai: string | null;
+  quick_switcher: string | null;
 };
 
 type HealthStatus = {
@@ -42,6 +44,7 @@ type UpdateCheckResult = {
 };
 
 export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: ReturnType<typeof usePrefs>[1] }) {
+  const toast = useToast();
   const [s, setS] = useState({ menubar: true, autoUpdate: true });
   const set = <K extends keyof typeof s>(k: K, v: (typeof s)[K]) => setS((prev) => ({ ...prev, [k]: v }));
   const [micDevices, setMicDevices] = useState<string[]>([]);
@@ -54,7 +57,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
     record: "ControlRight",
     pushToTalk: "Hold Fn",
     stop: "Esc",
-    refine: "Ctrl+Shift+R",
+    quick: "Ctrl+Shift+Space",
   });
   const [editingShortcut, setEditingShortcut] = useState<keyof typeof shortcuts | null>(null);
   const [capturePreview, setCapturePreview] = useState<string | null>(null);
@@ -63,10 +66,23 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string>("Up to date. Latest models synced 2 hours ago.");
   const [appVersion, setAppVersion] = useState<string>("");
+  const [typingWpm, setTypingWpm] = useState(40);
 
   useEffect(() => {
     getVersion().then(setAppVersion).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    invoke<{ typing_baseline_wpm: number }>("get_productivity_settings")
+      .then((s) => setTypingWpm(s.typing_baseline_wpm))
+      .catch(console.error);
+  }, []);
+
+  const saveTypingWpm = (v: number) => {
+    const clamped = Math.min(300, Math.max(10, v));
+    setTypingWpm(clamped);
+    invoke("set_typing_baseline_wpm", { value: clamped }).catch(console.error);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -103,7 +119,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
           record: bindings.record,
           pushToTalk: bindings.push_to_talk ?? prev.pushToTalk,
           stop: bindings.stop_and_discard ?? prev.stop,
-          refine: bindings.refine_with_ai ?? prev.refine,
+          quick: bindings.quick_switcher ?? prev.quick,
         }));
       })
       .catch(console.error);
@@ -176,25 +192,29 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
       if (editingShortcut === "record") {
         try {
           await invoke("set_shortcut", { shortcut: captured });
+          toast.showOk(`Record toggle set to ${captured}`);
         } catch (err) {
           console.error(err);
+          toast.showErr(`Could not save shortcut: ${errorText(err)}`);
           const saved = await invoke<string>("get_shortcut").catch(() => "");
           if (saved) setShortcuts((prev) => ({ ...prev, record: saved }));
         }
         return;
       }
 
-      const actionMap: Record<Exclude<keyof typeof shortcuts, "record">, "push_to_talk" | "stop_and_discard" | "refine_with_ai"> = {
+      const actionMap: Record<Exclude<keyof typeof shortcuts, "record">, "push_to_talk" | "stop_and_discard" | "quick_switcher"> = {
         pushToTalk: "push_to_talk",
         stop: "stop_and_discard",
-        refine: "refine_with_ai",
+        quick: "quick_switcher",
       };
       const action = actionMap[editingShortcut as Exclude<keyof typeof shortcuts, "record">];
       if (!action) return;
       try {
         await invoke("set_shortcut_binding", { action, shortcut: captured });
+        toast.showOk(`Shortcut set to ${captured}`);
       } catch (err) {
         console.error(err);
+        toast.showErr(`Could not save shortcut: ${errorText(err)}`);
         const bindings = await invoke<ShortcutBindings>("get_shortcut_bindings").catch(() => null);
         if (!bindings) return;
         setShortcuts((prev) => ({
@@ -202,7 +222,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
           record: bindings.record,
           pushToTalk: bindings.push_to_talk ?? prev.pushToTalk,
           stop: bindings.stop_and_discard ?? prev.stop,
-          refine: bindings.refine_with_ai ?? prev.refine,
+          quick: bindings.quick_switcher ?? prev.quick,
         }));
       }
     };
@@ -344,9 +364,9 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
         <div className="divider" style={{ margin: "20px 0 16px" }} />
 
         <div className="row" style={{ gap: 18 }}>
-          <div style={{ flex: 1 }}>
+          <div style={{ flex: "0 0 auto" }}>
             <div style={{ fontSize: 12, fontWeight: 500, color: "var(--ink-2)", marginBottom: 8 }}>Sidebar style</div>
-            <div className="seg-row">
+            <div className="seg-row" style={{ width: 220 }}>
               {[
                 { v: "icons", label: "Icons only" },
                 { v: "wide",  label: "Icons + labels" },
@@ -356,27 +376,19 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
               ))}
             </div>
           </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12, fontWeight: 500, color: "var(--ink-2)", marginBottom: 8 }}>Layout density</div>
-            <div className="seg-row">
-              {[
-                { v: "compact", label: "Compact" },
-                { v: "regular", label: "Regular" },
-                { v: "comfy",   label: "Comfy" },
-              ].map((opt) => (
-                <button key={opt.v} onClick={() => setPrefs("density", opt.v as Prefs["density"])}
-                  className={"seg " + (prefs.density === opt.v ? "seg-on" : "")}>{opt.label}</button>
-              ))}
-            </div>
-          </div>
-          <div style={{ flex: 1.2 }}>
-            <div style={{ fontSize: 12, fontWeight: 500, color: "var(--ink-2)", marginBottom: 8 }}>Display name</div>
+          <div style={{ flex: 0.8 }}>
+            <div style={{ fontSize: 12, fontWeight: 500, color: "var(--ink-2)", marginBottom: 8 }}>Typing speed (WPM)</div>
             <input
               className="input"
-              value={prefs.userName}
-              onChange={(e) => setPrefs("userName", e.target.value)}
+              type="number"
+              min={10}
+              max={300}
+              value={typingWpm}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10);
+                if (!isNaN(v)) saveTypingWpm(v);
+              }}
               style={{ height: 36 }}
-              placeholder="Your name"
             />
           </div>
         </div>
@@ -464,7 +476,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
             <Divider />
             <Shortcut label="Stop and discard" value={captureValue(editingShortcut === "stop", capturePreview, shortcuts.stop)} editing={editingShortcut === "stop"} onEdit={() => beginCapture("stop", setEditingShortcut, setCapturePreview)} />
             <Divider />
-            <Shortcut label="Refine with AI" value={captureValue(editingShortcut === "refine", capturePreview, shortcuts.refine)} editing={editingShortcut === "refine"} onEdit={() => beginCapture("refine", setEditingShortcut, setCapturePreview)} />
+            <Shortcut label="Quick switcher" value={captureValue(editingShortcut === "quick", capturePreview, shortcuts.quick)} editing={editingShortcut === "quick"} onEdit={() => beginCapture("quick", setEditingShortcut, setCapturePreview)} />
           </div>
 
           <div className="card" style={{ background: "var(--ink-1)", color: "oklch(95% 0.005 85)", borderColor: "transparent" }}>
@@ -492,6 +504,10 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
       </div>
     </div>
   );
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function Setting({ label, desc, icon, children }: { label: string; desc?: string; icon: ReactNode; children?: ReactNode }) {
@@ -534,8 +550,8 @@ function Shortcut({ label, value, editing, onEdit }: { label: string; value: str
 }
 
 function beginCapture(
-  key: "record" | "pushToTalk" | "stop" | "refine",
-  setEditingShortcut: (v: "record" | "pushToTalk" | "stop" | "refine" | null) => void,
+  key: "record" | "pushToTalk" | "stop" | "quick",
+  setEditingShortcut: (v: "record" | "pushToTalk" | "stop" | "quick" | null) => void,
   setCapturePreview: (v: string | null) => void,
 ) {
   setCapturePreview(null);
