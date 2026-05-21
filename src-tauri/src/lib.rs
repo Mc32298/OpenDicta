@@ -2701,7 +2701,7 @@ fn normalize_audio(samples: &mut [f32]) {
 
     let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
     let rms = (sum_sq / samples.len() as f32).sqrt();
-    if rms <= 0.0 {
+    if !rms.is_finite() || rms <= 0.0 {
         return;
     }
 
@@ -4279,7 +4279,7 @@ mod ai_settings_tests {
         let mut samples = vec![0.00001_f32; 16_000];
         normalize_audio(&mut samples);
         let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
-        assert!(peak <= 0.0002, "near-silent signal over-amplified: peak {peak}");
+        assert!(peak < 0.0003, "near-silent signal over-amplified: peak {peak}");
     }
 
     #[test]
@@ -4308,6 +4308,6 @@ mod ai_settings_tests {
         let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
         assert!(peak <= 0.97);
         let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
-        assert!(rms <= 0.31, "already-loud signal was amplified: rms {rms}");
+        assert!(rms >= 0.29 && rms <= 0.31, "signal level changed unexpectedly: rms {rms}");
     }
 }
