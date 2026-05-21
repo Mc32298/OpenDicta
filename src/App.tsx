@@ -11,10 +11,12 @@ const windowName = new URLSearchParams(window.location.search).get("window") ?? 
 if (windowName === "settings")    void import("./shell/AppShell");
 else if (windowName === "onboarding") void import("./windows/Onboarding");
 else if (windowName === "empty")  void import("./windows/EmptyStates");
+else if (windowName === "quickswitch") void import("./windows/QuickSwitch");
 
 const AppShell = lazy(() => import("./shell/AppShell"));
 const Onboarding = lazy(() => import("./windows/Onboarding"));
 const EmptyStates = lazy(() => import("./windows/EmptyStates"));
+const QuickSwitch = lazy(() => import("./windows/QuickSwitch"));
 
 let prefetched = false;
 function prefetchWindows() {
@@ -45,5 +47,6 @@ export default function App() {
   }
   if (windowName === "onboarding") return <Suspense fallback={null}><Onboarding /></Suspense>;
   if (windowName === "empty")      return <Suspense fallback={null}><EmptyStates /></Suspense>;
+  if (windowName === "quickswitch") return <Suspense fallback={null}><QuickSwitch /></Suspense>;
   return <VoiceBar />;
 }
