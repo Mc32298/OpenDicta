@@ -1,59 +1,103 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import PageHead from "./PageHead";
 import { CheckIcon } from "../ui/icons";
 import { useModelManager } from "../hooks/useModelManager";
+import { MODEL_CATALOG, catalogName } from "../lib/catalog";
+
+type LangMode = "auto" | "whisper" | "fixed";
 
 const MODELS = [
   {
     id: "parakeet",
-    name: "Parakeet V3",
+    name: catalogName(MODEL_CATALOG, "parakeet"),
     tag: "Lightning-fast streaming",
-    desc: "Multi-Language, Best for live dictation, voice commands, and quick memos where speed matters.",
+    desc: "Best for live dictation, voice commands, and quick memos where speed matters.",
     perf: 83, qual: 80,
     size: "670 MB",
     badge: "Default",
+    langMode: "auto" as LangMode,
+    langLabel: "Auto · 25 langs",
   },
   {
     id: "qwen3_asr",
-    name: "Whisper Pro",
+    name: catalogName(MODEL_CATALOG, "qwen3_asr"),
     tag: "Balanced accuracy",
-    desc: "The all-rounder. Handles accents, technical jargon, and noisy rooms well. Use this when you don't know what you'll be recording. English Only.",
+    desc: "The all-rounder. Handles accents, technical jargon, and noisy rooms well.",
     perf: 78, qual: 86,
     size: "982 MB",
     badge: "Recommended",
+    langMode: "fixed" as LangMode,
+    langLabel: "English",
   },
   {
     id: "whisper_small",
-    name: "Whisper Light",
+    name: catalogName(MODEL_CATALOG, "whisper_small"),
     tag: "Compact & efficient",
-    desc: "Fast and lean. Great for everyday dictation on lower-powered hardware. Slightly less robust with heavy accents or background noise. English Only..",
+    desc: "Fast and lean. Great for everyday dictation on lower-powered hardware. Slightly less robust with heavy accents or background noise.",
     perf: 95, qual: 70,
     size: "374 MB",
+    langMode: "whisper" as LangMode,
+    langLabel: "Multi",
   },
   {
     id: "whisper_large",
-    name: "Whisper Pro+",
+    name: catalogName(MODEL_CATALOG, "whisper_large"),
     tag: "High accuracy",
-    desc: "The full-size Whisper model. Excellent with accents, mixed languages, and dense technical content. Slower on CPU. English Only.",
+    desc: "The full-size Whisper model. Excellent with accents, mixed languages, and dense technical content. Slower on CPU.",
     perf: 40, qual: 98,
     size: "1.8 GB",
     badge: "Pro",
+    langMode: "whisper" as LangMode,
+    langLabel: "Multi",
   },
   {
     id: "whisper_large_v3_turbo",
-    name: "Whisper MAX",
+    name: catalogName(MODEL_CATALOG, "whisper_large_v3_turbo"),
     tag: "Maximum accuracy, distilled",
-    desc: "Frontier-grade quality at roughly half the compute of large. Best for interviews, podcasts, and court-quality transcripts. English Only.",
+    desc: "Frontier-grade quality at roughly half the compute of large. Best for interviews, podcasts, and court-quality transcripts.",
     perf: 75, qual: 96,
     size: "1.0 GB",
     badge: "Pro",
+    langMode: "whisper" as LangMode,
+    langLabel: "Multi",
   },
+];
+
+const WHISPER_LANGUAGES = [
+  { code: "en", label: "English" },
+  { code: "es", label: "Spanish" },
+  { code: "fr", label: "French" },
+  { code: "de", label: "German" },
+  { code: "it", label: "Italian" },
+  { code: "pt", label: "Portuguese" },
+  { code: "nl", label: "Dutch" },
+  { code: "pl", label: "Polish" },
+  { code: "ru", label: "Russian" },
+  { code: "uk", label: "Ukrainian" },
+  { code: "ja", label: "Japanese" },
+  { code: "ko", label: "Korean" },
+  { code: "zh", label: "Chinese" },
+  { code: "ar", label: "Arabic" },
+  { code: "hi", label: "Hindi" },
+  { code: "auto", label: "Auto-detect" },
 ];
 
 export default function Models() {
   const { activeModelId, statuses, selectModel, downloadModel, deleteModel } = useModelManager();
   const [hovered, setHovered] = useState<string | null>(null);
+  const [language, setLanguage] = useState("en");
 
+  useEffect(() => {
+    void invoke<string>("get_stt_language").then(setLanguage);
+  }, []);
+
+  const handleLanguageChange = (lang: string) => {
+    setLanguage(lang);
+    void invoke("set_stt_language", { language: lang });
+  };
+
+  const activeModel = MODELS.find((m) => m.id === activeModelId);
   const downloadedCount = Object.values(statuses).filter((s) => s.downloaded).length;
 
   return (
@@ -100,6 +144,15 @@ export default function Models() {
           </div>
         </div>
       </div>
+
+      {activeModel && statuses[activeModel.id]?.downloaded && (
+        <LanguageSelector
+          key={activeModel.id}
+          model={activeModel}
+          language={language}
+          onChange={handleLanguageChange}
+        />
+      )}
     </div>
   );
 }
@@ -175,7 +228,10 @@ function ModelCard({ model, active, hovered, status, onSelect, onDownload, onDel
           <span className="mono tnum" style={{ color: "var(--ink-4)" }}>{model.size}</span>
           <span>QUALITY · {model.qual}</span>
         </div>
-        {downloaded && hovered && !active && (
+        <div style={{ marginTop: 6 }}>
+          <span className="chip" style={{ fontSize: 10.5, padding: "2px 7px" }}>{model.langLabel}</span>
+        </div>
+        {downloaded && !active && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
@@ -186,12 +242,15 @@ function ModelCard({ model, active, hovered, status, onSelect, onDownload, onDel
               fontSize: 11,
               fontWeight: 500,
               color: "oklch(55% 0.12 25)",
-              background: "oklch(98% 0.01 25 / 0.06)",
+              background: hovered ? "oklch(98% 0.01 25 / 0.06)" : "transparent",
               border: "0.5px solid oklch(70% 0.08 25 / 0.35)",
               borderRadius: 6,
               cursor: "pointer",
               font: "inherit",
-              transition: "background .12s",
+              opacity: hovered ? 1 : 0,
+              transform: hovered ? "translateY(0)" : "translateY(4px)",
+              pointerEvents: hovered ? "auto" : "none",
+              transition: "opacity 0.18s ease, transform 0.18s ease, background 0.12s",
             }}
           >
             Uninstall
@@ -247,6 +306,69 @@ function ProgressBar({ progress }: { progress: number }) {
       <div style={{ fontSize: 11, color: "var(--ink-3)", textAlign: "center" }}>
         Downloading… {progress}%
       </div>
+    </div>
+  );
+}
+
+interface LanguageSelectorProps {
+  model: typeof MODELS[0];
+  language: string;
+  onChange: (lang: string) => void;
+}
+
+function LanguageSelector({ model, language, onChange }: LanguageSelectorProps) {
+  if (model.langMode === "fixed") return null;
+
+  return (
+    <div className="panel-rise" style={{
+      marginTop: 24,
+      padding: "18px 22px",
+      background: "var(--bg-card)",
+      border: "0.5px solid var(--line)",
+      borderRadius: 12,
+      boxShadow: "var(--shadow-card)",
+      display: "flex",
+      alignItems: "center",
+      gap: 16,
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-1)" }}>
+          {model.langMode === "whisper" ? "Transcription language" : "Language detection"}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 2 }}>
+          {model.langMode === "whisper"
+            ? "Force a specific language, or let Whisper auto-detect."
+            : "Parakeet automatically detects the spoken language — no configuration needed."}
+        </div>
+      </div>
+
+      {model.langMode === "whisper" ? (
+        <select
+          value={language}
+          onChange={(e) => onChange(e.target.value)}
+          style={{
+            background: "var(--bg-sunken)",
+            border: "0.5px solid var(--line)",
+            borderRadius: 8,
+            color: "var(--ink-1)",
+            fontSize: 13,
+            fontWeight: 500,
+            padding: "6px 10px",
+            cursor: "pointer",
+            outline: "none",
+            minWidth: 140,
+            font: "inherit",
+          }}
+        >
+          {WHISPER_LANGUAGES.map((l) => (
+            <option key={l.code} value={l.code}>{l.label}</option>
+          ))}
+        </select>
+      ) : (
+        <span className="chip chip-accent" style={{ fontSize: 11.5, whiteSpace: "nowrap" }}>
+          Auto · 25 langs
+        </span>
+      )}
     </div>
   );
 }
