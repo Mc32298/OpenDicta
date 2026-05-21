@@ -2813,8 +2813,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
 
     // 4b. Fast no-speech guard: skip worker call for extremely short or silent input.
     // This avoids getting stuck in "Transcribing..." when the user only tapped the key.
-    // The gate runs on the ORIGINAL signal — after normalization even silence
-    // would be boosted to the target level and always pass.
+    // RMS is measured here, before normalization, so a silent recording is still rejected.
     let duration_sec = samples_16khz.len() as f32 / 16_000.0;
     let rms = if samples_16khz.is_empty() {
         0.0
@@ -2824,10 +2823,6 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     };
     let too_short = duration_sec < 0.20;
     let too_quiet = rms < 0.002;
-
-    // Boost quiet/whispered speech toward a healthy level before saving the WAV.
-    // Runs after the gate so genuine silence is still rejected above.
-    normalize_audio(&mut samples_16khz);
     if too_short || too_quiet {
         *state.pending_transcript_meta.lock().unwrap() = None;
         let reason = if too_short {
@@ -2851,6 +2846,9 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
 
     // Tell the frontend to show "Transcribing…" only after speech presence checks pass.
     app.emit("recording-stopped", ()).ok();
+
+    // Boost quiet/whispered speech toward a healthy level before saving the WAV.
+    normalize_audio(&mut samples_16khz);
 
     // 5. Save to a temp WAV file
     let wav_path = std::env::temp_dir().join(format!("OpenDicta_{}.wav", now_millis()));
