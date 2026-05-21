@@ -2692,7 +2692,7 @@ fn start_audio_capture(
 /// can't introduce clipping). Pure and in-place. No-op on empty/silent input.
 fn normalize_audio(samples: &mut [f32]) {
     const TARGET_RMS: f32 = 0.1;
-    const MAX_GAIN: f32 = 20.0;
+    const MAX_GAIN: f32 = 8.0; // 26 dB was too aggressive; 18 dB preserves SNR for Whisper
     const LIMIT: f32 = 0.97;
 
     if samples.is_empty() {
@@ -4272,7 +4272,8 @@ mod ai_settings_tests {
 
     #[test]
     fn normalize_boosts_quiet_signal_toward_target() {
-        let mut samples = vec![0.01_f32; 16_000];
+        // rms 0.02 → gain 5x (under the 8x cap) → output rms ≈ 0.10
+        let mut samples = vec![0.02_f32; 16_000];
         normalize_audio(&mut samples);
         let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
         assert!(rms > 0.08 && rms <= 0.12, "rms after boost was {rms}");
@@ -4280,10 +4281,11 @@ mod ai_settings_tests {
 
     #[test]
     fn normalize_caps_gain_for_near_silent_signal() {
+        // rms ~1e-5; uncapped gain would be ~10000x. Cap is 8x → peak = 0.00008.
         let mut samples = vec![0.00001_f32; 16_000];
         normalize_audio(&mut samples);
         let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
-        assert!(peak < 0.0003, "near-silent signal over-amplified: peak {peak}");
+        assert!(peak < 0.001, "near-silent signal over-amplified: peak {peak}");
     }
 
     #[test]
