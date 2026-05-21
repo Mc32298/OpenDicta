@@ -3626,7 +3626,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { .. } = event {
+            if let TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                 open_settings(tray.app_handle());
             }
         })
