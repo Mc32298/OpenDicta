@@ -27,10 +27,20 @@ jobs:
         run: npm install
 
       - name: Build worker binary
-        run: cargo build --release -p opendicta-worker
+        run: cargo build --release --target x86_64-pc-windows-msvc -p opendicta-worker
 
       - name: Stage worker for externalBin
         run: node scripts/copy-worker.mjs
+
+      - name: Verify staged worker artifact
+        shell: pwsh
+        run: |
+          Write-Host "Expecting staged externalBin worker in src-tauri/binaries:"
+          Get-ChildItem src-tauri\binaries -Force | Format-Table Name,Length,LastWriteTime
+          if (!(Test-Path "src-tauri\binaries\opendicta-worker-x86_64-pc-windows-msvc.exe")) {
+            Write-Error "Missing src-tauri\\binaries\\opendicta-worker-x86_64-pc-windows-msvc.exe"
+            exit 1
+          }
 
       - name: Build and publish Tauri release
         uses: tauri-apps/tauri-action@v0
