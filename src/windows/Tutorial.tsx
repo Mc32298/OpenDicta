@@ -9,6 +9,71 @@ type TourStep = {
   imageSrc?: string;
 };
 
+function DictationVisual() {
+  return (
+    <div className="wv-tv wv-tv-dictation">
+      <span className="wv-tv-key">Ctrl</span>
+      <div className="wv-tv-wave">
+        {[0, 1, 2, 3, 4, 5, 6].map((n) => (
+          <span key={n} style={{ animationDelay: `${n * 0.09}s` }} />
+        ))}
+      </div>
+      <div className="wv-tv-line" />
+    </div>
+  );
+}
+
+function ToolbarVisual() {
+  return (
+    <div className="wv-tv wv-tv-toolbar">
+      <div className="wv-tv-pill">
+        <span className="wv-tv-rec" />
+        <span className="wv-tv-bar" />
+        <span className="wv-tv-bar" />
+        <span className="wv-tv-dot" />
+      </div>
+    </div>
+  );
+}
+
+function ModelsVisual() {
+  return (
+    <div className="wv-tv wv-tv-models">
+      <div className="wv-tv-chip is-active">Parakeet</div>
+      <div className="wv-tv-chip">Whisper</div>
+      <div className="wv-tv-chip">Custom</div>
+    </div>
+  );
+}
+
+function AiVisual() {
+  return (
+    <div className="wv-tv wv-tv-ai">
+      <div className="wv-tv-raw">um, so like, the report is, uh, done</div>
+      <div className="wv-tv-arrow">→</div>
+      <div className="wv-tv-clean">The report is done. <span className="wv-tv-spark">✦</span></div>
+    </div>
+  );
+}
+
+function InsightsVisual() {
+  return (
+    <div className="wv-tv wv-tv-insights">
+      {[40, 65, 50, 80, 95].map((h, n) => (
+        <span key={n} style={{ height: `${h}%`, animationDelay: `${n * 0.08}s` }} />
+      ))}
+    </div>
+  );
+}
+
+function WrapVisual() {
+  return (
+    <div className="wv-tv wv-tv-wrap">
+      <div className="wv-tv-check">✓</div>
+    </div>
+  );
+}
+
 const TOUR_STEPS: TourStep[] = [
   {
     id: "dictation",
@@ -56,9 +121,7 @@ export default function Tutorial({ onDone }: { onDone: () => void }) {
 
   return (
     <div className="wv-tour">
-      <button type="button" className="wv-btn wv-btn-ghost wv-tour-skip" onClick={onDone}>
-        Skip tour
-      </button>
+      <Button variant="ghost" className="wv-tour-skip" onClick={onDone}>Skip tour</Button>
 
       <div className="wv-tour-stage" key={step.id}>
         {step.imageSrc ? (
@@ -92,71 +155,6 @@ export default function Tutorial({ onDone }: { onDone: () => void }) {
           </Button>
         </div>
       </div>
-    </div>
-  );
-}
-
-function DictationVisual() {
-  return (
-    <div className="wv-tv wv-tv-dictation">
-      <span className="wv-tv-key">Ctrl</span>
-      <div className="wv-tv-wave">
-        {[0, 1, 2, 3, 4, 5, 6].map((n) => (
-          <span key={n} style={{ animationDelay: `${n * 0.09}s` }} />
-        ))}
-      </div>
-      <div className="wv-tv-line" />
-    </div>
-  );
-}
-
-function ToolbarVisual() {
-  return (
-    <div className="wv-tv wv-tv-toolbar">
-      <div className="wv-tv-pill">
-        <span className="wv-tv-rec" />
-        <span className="wv-tv-bar" />
-        <span className="wv-tv-bar" />
-        <span className="wv-tv-dot" />
-      </div>
-    </div>
-  );
-}
-
-function ModelsVisual() {
-  return (
-    <div className="wv-tv wv-tv-models">
-      <div className="wv-tv-chip">Parakeet</div>
-      <div className="wv-tv-chip is-active">Whisper</div>
-      <div className="wv-tv-chip">Custom</div>
-    </div>
-  );
-}
-
-function AiVisual() {
-  return (
-    <div className="wv-tv wv-tv-ai">
-      <div className="wv-tv-raw">um, so like, the report is, uh, done</div>
-      <div className="wv-tv-arrow">→</div>
-      <div className="wv-tv-clean">The report is done. <span className="wv-tv-spark">✦</span></div>
-    </div>
-  );
-}
-
-function InsightsVisual() {
-  return (
-    <div className="wv-tv wv-tv-insights">
-      {[40, 65, 50, 80, 95].map((h, n) => (
-        <span key={n} style={{ height: `${h}%`, animationDelay: `${n * 0.08}s` }} />
-      ))}
-    </div>
-  );
-}
-
-function WrapVisual() {
-  return (
-    <div className="wv-tv wv-tv-wrap">
-      <div className="wv-tv-check">✓</div>
     </div>
   );
 }
