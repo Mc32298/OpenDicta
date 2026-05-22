@@ -11,3 +11,5 @@ src-tauri/binaries/
 .claude/settings.json
 .superpowers
 .claude
+
+docs/
