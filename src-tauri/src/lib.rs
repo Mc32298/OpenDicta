@@ -721,122 +721,6 @@ async fn cancel_recording(
 }
 
 #[tauri::command]
-async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> {
-    #[derive(serde::Deserialize)]
-    struct GithubRelease {
-        tag_name: String,
-        html_url: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct GithubTag {
-        name: String,
-    }
-
-    fn normalize_version(value: &str) -> &str {
-        value.trim().trim_start_matches('v')
-    }
-
-    fn is_newer_version(current: &str, latest: &str) -> bool {
-        match (
-            semver::Version::parse(normalize_version(current)),
-            semver::Version::parse(normalize_version(latest)),
-        ) {
-            (Ok(current), Ok(latest)) => latest > current,
-            _ => normalize_version(current) != normalize_version(latest),
-        }
-    }
-
-    let current_version = app.package_info().version.to_string();
-    let client = reqwest::Client::builder()
-        .user_agent("OpenDicta/0.1 (update-check)")
-        .build()
-        .map_err(|e| format!("Failed to build update checker: {}", e))?;
-
-    let release_response = client
-        .get("https://api.github.com/repos/Mc32298/OpenDicta/releases/latest")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to contact GitHub: {}", e))?;
-
-    if release_response.status().is_success() {
-        let release = release_response
-            .json::<GithubRelease>()
-            .await
-            .map_err(|e| format!("Failed to parse update response: {}", e))?;
-
-        let latest_version = normalize_version(&release.tag_name).to_string();
-        let update_available = is_newer_version(&current_version, &latest_version);
-        let message = if update_available {
-            format!("Update available: {} (current {}).", latest_version, current_version)
-        } else {
-            format!("You're on the latest version: {}.", current_version)
-        };
-
-        return Ok(UpdateCheckResult {
-            current_version,
-            latest_version,
-            update_available,
-            release_url: release.html_url,
-            message,
-        });
-    }
-
-    if release_response.status() != reqwest::StatusCode::NOT_FOUND {
-        return Err(format!(
-            "GitHub update check failed: HTTP status client error ({}) for url ({})",
-            release_response.status(),
-            "https://api.github.com/repos/Mc32298/OpenDicta/releases/latest"
-        ));
-    }
-
-    let tags = client
-        .get("https://api.github.com/repos/Mc32298/OpenDicta/tags")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to contact GitHub tags endpoint: {}", e))?
-        .error_for_status()
-        .map_err(|e| format!("GitHub tag lookup failed: {}", e))?
-        .json::<Vec<GithubTag>>()
-        .await
-        .map_err(|e| format!("Failed to parse tag response: {}", e))?;
-
-    let Some(tag) = tags.first() else {
-        return Ok(UpdateCheckResult {
-            current_version: current_version.clone(),
-            latest_version: current_version.clone(),
-            update_available: false,
-            release_url: "https://github.com/Mc32298/OpenDicta/releases".to_string(),
-            message: format!("No published releases or tags found. Current version is {}.", current_version),
-        });
-    };
-
-    let latest_version = normalize_version(&tag.name).to_string();
-    let update_available = is_newer_version(&current_version, &latest_version);
-    let message = if update_available {
-        format!("Update available: {} (current {}).", latest_version, current_version)
-    } else {
-        format!("You're on the latest version: {}.", current_version)
-    };
-
-    Ok(UpdateCheckResult {
-        current_version,
-        latest_version,
-        update_available,
-        release_url: "https://github.com/Mc32298/OpenDicta/tags".to_string(),
-        message,
-    })
-}
-
-#[derive(serde::Serialize)]
-struct UpdateCheckResult {
-    current_version: String,
-    latest_version: String,
-    update_available: bool,
-    release_url: String,
-    message: String,
-}
-
-#[tauri::command]
 async fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
     app.autolaunch()
         .is_enabled()
@@ -4118,6 +4002,17 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin({
+            let mut builder = tauri_plugin_updater::Builder::new();
+            if let Some(pubkey) = option_env!("TAURI_UPDATER_PUBLIC_KEY") {
+                if !pubkey.trim().is_empty() {
+                    builder = builder.pubkey(pubkey);
+                }
+            }
+            builder.build()
+        })
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             stop_recording,
@@ -4128,7 +4023,6 @@ pub fn run() {
             get_productivity_settings,
             set_typing_baseline_wpm,
             cancel_recording,
-            check_for_updates,
             get_shortcut,
             get_waveform_color,
             get_active_model_id,

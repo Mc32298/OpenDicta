@@ -14,8 +14,11 @@
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-is-registered",
     "clipboard-manager:allow-write-text",
+    "dialog:default",
     "autostart:allow-enable",
     "autostart:allow-disable",
-    "autostart:allow-is-enabled"
+    "autostart:allow-is-enabled",
+    "process:default",
+    "updater:default"
   ]
 }

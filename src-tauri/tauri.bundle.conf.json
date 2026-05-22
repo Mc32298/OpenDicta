@@ -2,6 +2,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.ico"],
     "externalBin": ["binaries/opendicta-worker"],
     "resources": {}

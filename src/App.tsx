@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect } from "react";
 import VoiceBar from "./windows/VoiceBar";
 import { ToastProvider } from "./ui/toast";
+import { maybeAutoCheckForUpdates } from "./lib/updater";
 
 const windowName = new URLSearchParams(window.location.search).get("window") ?? "voicebar";
 
@@ -36,6 +37,11 @@ export default function App() {
       const id = globalThis.setTimeout(prefetchWindows, 250);
       return () => globalThis.clearTimeout(id);
     }
+  }, []);
+
+  useEffect(() => {
+    if (windowName !== "voicebar") return;
+    void maybeAutoCheckForUpdates();
   }, []);
 
   if (windowName === "settings") {

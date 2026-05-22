@@ -7,6 +7,16 @@ import { THEMES, usePrefs } from "../shell/prefs";
 import type { Prefs } from "../shell/prefs";
 import { useToast } from "../ui/toast";
 import {
+  checkForAppUpdate,
+  getUpdateActionLabel,
+  installAvailableUpdate,
+  isUpdateActionDisabled,
+  readStoredUpdateState,
+  restartToApplyUpdate,
+  subscribeToUpdateState,
+  type UpdateState,
+} from "../lib/updater";
+import {
   CheckIcon, DiagnosticIcon, PowerIcon, DashboardIcon, ModelsIcon,
   WaveIcon, MicIcon, SparkleIcon,
 } from "../ui/icons";
@@ -35,14 +45,6 @@ type MicrophoneTestResult = {
   message: string;
 };
 
-type UpdateCheckResult = {
-  current_version: string;
-  latest_version: string;
-  update_available: boolean;
-  release_url: string;
-  message: string;
-};
-
 export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: ReturnType<typeof usePrefs>[1] }) {
   const toast = useToast();
   const [s, setS] = useState({ menubar: true, autoUpdate: true });
@@ -63,8 +65,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   const [capturePreview, setCapturePreview] = useState<string | null>(null);
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [diagnosticMessage, setDiagnosticMessage] = useState<string>("");
-  const [updateBusy, setUpdateBusy] = useState(false);
-  const [updateMessage, setUpdateMessage] = useState<string>("Up to date. Latest models synced 2 hours ago.");
+  const [updateState, setUpdateState] = useState<UpdateState>(readStoredUpdateState);
   const [appVersion, setAppVersion] = useState<string>("");
   const [typingWpm, setTypingWpm] = useState(40);
 
@@ -130,6 +131,8 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
     invoke("set_audio_input_device", { deviceName: selectedMic }).catch(console.error);
   }, [selectedMic]);
 
+  useEffect(() => subscribeToUpdateState(setUpdateState), []);
+
   async function runDiagnostics() {
     if (diagnosticBusy) return;
     setDiagnosticBusy(true);
@@ -150,17 +153,17 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
     }
   }
 
-  async function runUpdateCheck() {
-    if (updateBusy) return;
-    setUpdateBusy(true);
-    setUpdateMessage("Checking for updates...");
+  async function runUpdateAction() {
     try {
-      const result = await invoke<UpdateCheckResult>("check_for_updates");
-      setUpdateMessage(result.message);
+      if (updateState.phase === "available") {
+        await installAvailableUpdate();
+      } else if (updateState.phase === "ready") {
+        await restartToApplyUpdate();
+      } else {
+        await checkForAppUpdate({ manual: true, promptIfAvailable: false });
+      }
     } catch (err) {
-      setUpdateMessage(`Update check failed: ${String(err)}`);
-    } finally {
-      setUpdateBusy(false);
+      toast.showErr(errorText(err));
     }
   }
 
@@ -497,15 +500,20 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 14, fontWeight: 600 }}>OpenDicta {appVersion}</div>
                 <div style={{ fontSize: 12, color: "oklch(75% 0.008 85)", marginTop: 4, lineHeight: 1.5 }}>
-                  {updateMessage}
+                  {updateState.message}
                 </div>
+                {updateState.availableVersion && (
+                  <div style={{ fontSize: 11.5, color: "oklch(75% 0.008 85)", marginTop: 6 }}>
+                    Latest available: {updateState.availableVersion}
+                  </div>
+                )}
                 <button
                   className="btn btn-sm btn-ghost"
                   style={{ marginTop: 10, color: "oklch(95% 0.005 85)" }}
-                  onClick={() => void runUpdateCheck()}
-                  disabled={updateBusy}
+                  onClick={() => void runUpdateAction()}
+                  disabled={isUpdateActionDisabled(updateState)}
                 >
-                  {updateBusy ? "Checking..." : "Check for updates →"}
+                  {getUpdateActionLabel(updateState)}
                 </button>
               </div>
             </div>

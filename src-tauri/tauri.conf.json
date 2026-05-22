@@ -51,5 +51,16 @@
   "bundle": {
     "active": true,
     "targets": "all"
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Mc32298/OpenDicta/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRENjAxOTBBNDc4MjBGMjUKUldRbEQ0SkhDaGxnVGNINE5KUzdQcnFkZ0QyQUkxNThRMU9BNVQybnkwYllPSnh3MkZORklxRloK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

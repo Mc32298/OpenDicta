@@ -21,6 +21,9 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-global-shortcut  = "2"   # Register system-wide hotkeys
 tauri-plugin-clipboard-manager = "2"  # Write transcript to clipboard
 tauri-plugin-autostart         = "2"  # Launch at login
+tauri-plugin-dialog            = "2"  # Native update prompts
+tauri-plugin-process           = "2"  # Restart after install
+tauri-plugin-updater           = "2"  # Signed app updates
 
 # Serialization — needed to pass data between Rust and JS
 serde      = { version = "1", features = ["derive"] }
