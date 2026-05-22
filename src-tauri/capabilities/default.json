@@ -2,11 +2,12 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for OpenDicta",
-  "windows": ["voicebar", "settings", "quickswitch"],
+  "windows": ["voicebar", "settings", "quickswitch", "onboarding"],
   "permissions": [
     "core:default",
     "core:window:allow-show",
     "core:window:allow-hide",
+    "core:window:allow-set-size",
     "core:window:allow-set-position",
     "core:window:allow-center",
     "global-shortcut:allow-register",
