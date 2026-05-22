@@ -7,7 +7,7 @@
  */
 
 import { execSync } from "child_process";
-import { mkdirSync, copyFileSync } from "fs";
+import { mkdirSync, copyFileSync, existsSync } from "fs";
 import { join, resolve } from "path";
 
 const root = resolve(import.meta.dirname, "..");
@@ -25,9 +25,23 @@ if (!triple) {
 }
 
 const ext = process.platform === "win32" ? ".exe" : "";
-const src = join(root, "target", "release", `opendicta-worker${ext}`);
+const targetTriple = process.env.TAURI_ENV_TARGET_TRIPLE || process.env.CARGO_BUILD_TARGET || triple;
+const candidateSrcPaths = [
+  // Cargo --target builds land here (CI release workflow path)
+  join(root, "target", targetTriple, "release", `opendicta-worker${ext}`),
+  // Default cargo build path (local dev path)
+  join(root, "target", "release", `opendicta-worker${ext}`),
+];
+const src = candidateSrcPaths.find((p) => existsSync(p));
+if (!src) {
+  console.error("copy-worker: source worker binary not found. Tried:");
+  for (const p of candidateSrcPaths) {
+    console.error(`  - ${p}`);
+  }
+  process.exit(1);
+}
 const destDir = join(root, "src-tauri", "binaries");
-const dest = join(destDir, `opendicta-worker-${triple}${ext}`);
+const dest = join(destDir, `opendicta-worker-${targetTriple}${ext}`);
 
 mkdirSync(destDir, { recursive: true });
 copyFileSync(src, dest);
