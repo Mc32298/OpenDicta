@@ -1238,9 +1238,10 @@ async fn complete_onboarding(
 #[tauri::command]
 async fn start_tutorial(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("onboarding") {
-        let _ = win.emit("start-tutorial", ());
+        // show/focus errors are non-fatal — event fires regardless
         let _ = win.show();
         let _ = win.set_focus();
+        let _ = win.emit("start-tutorial", ());
     } else {
         tauri::WebviewWindowBuilder::new(
             &app,
