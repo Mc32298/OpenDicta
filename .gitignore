@@ -9,4 +9,5 @@ src-tauri/binaries/
 # Claude Code worktrees and session state
 .claude/worktrees/
 .claude/settings.json
-.superpowers/
+.superpowers
+.claude
