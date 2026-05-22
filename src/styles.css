@@ -653,7 +653,6 @@ html, body {
 .wv-tt-char--correct { color: var(--ac-green); }
 .wv-tt-char--incorrect { color: var(--ac-red); background: color-mix(in oklch, var(--ac-red) 16%, transparent); }
 .wv-tt-char--current { background: color-mix(in oklch, var(--accent) 22%, transparent); border-bottom: 2px solid var(--accent); }
-.wv-tt-input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 .wv-tt-hint { font-size: 12px; color: var(--ink-3); }
 .wv-tt-result { display: flex; flex-direction: column; gap: 12px; }
 .wv-tt-result-line { font-size: 14px; color: var(--ink-1); }

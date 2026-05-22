@@ -22,7 +22,7 @@ export default function TypingTestModal({
   const [started, setStarted] = useState(false);
   const [finished, setFinished] = useState(false);
 
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<number | null>(null);
 
   const chars = useMemo(() => text.split(""), [text]);
@@ -48,21 +48,49 @@ export default function TypingTestModal({
     setSeconds(0);
     setStarted(false);
     setFinished(false);
-    window.requestAnimationFrame(() => inputRef.current?.focus());
+    window.requestAnimationFrame(() => modalRef.current?.focus());
   }
 
-  // Initialise / reset whenever the modal opens.
+  // Initialise whenever the modal opens.
   useEffect(() => {
     if (open) reset();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Cleanup the timer on unmount.
+  // Cleanup timer on unmount.
   useEffect(() => {
     return () => {
       if (timerRef.current !== null) window.clearInterval(timerRef.current);
     };
   }, []);
+
+  // Re-focus the modal div on any keypress so typing always works even if a
+  // button stole focus momentarily.
+  useEffect(() => {
+    if (!open || finished) return;
+    const refocus = (e: KeyboardEvent) => {
+      if (document.activeElement !== modalRef.current && (e.key.length === 1 || e.key === "Backspace")) {
+        modalRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", refocus, true);
+    return () => window.removeEventListener("keydown", refocus, true);
+  }, [open, finished]);
+
+  // Detect test completion via effect so it works with keystroke-based input.
+  useEffect(() => {
+    if (finished || !text || typed.length === 0 || typed.length !== chars.length) return;
+    if (timerRef.current !== null) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    let m = 0;
+    for (let i = 0; i < typed.length; i++) if (typed[i] !== chars[i]) m++;
+    const finalWpm = netWpm(typed.length, m, seconds || 1);
+    setFinished(true);
+    onComplete(clampWpm(finalWpm));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typed]);
 
   function startTimer() {
     setStarted(true);
@@ -71,23 +99,21 @@ export default function TypingTestModal({
     }, 1000);
   }
 
-  function handleInput(value: string) {
+  function handleKey(e: React.KeyboardEvent<HTMLDivElement>) {
     if (finished) return;
-    const next = value.slice(0, chars.length);
-    if (!started && next.length > 0) startTimer();
-    setTyped(next);
 
-    if (next.length === chars.length && chars.length > 0) {
-      if (timerRef.current !== null) {
-        window.clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-      setFinished(true);
-      let m = 0;
-      for (let i = 0; i < next.length; i++) if (next[i] !== chars[i]) m++;
-      const finalWpm = netWpm(next.length, m, seconds || 1);
-      onComplete(clampWpm(finalWpm));
+    if (e.key === "Backspace") {
+      e.preventDefault();
+      setTyped((prev) => prev.slice(0, -1));
+      return;
     }
+
+    // Ignore non-printable keys and modifier combos.
+    if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return;
+    e.preventDefault();
+
+    if (!started) startTimer();
+    setTyped((prev) => (prev.length < chars.length ? prev + e.key : prev));
   }
 
   function charStateAt(i: number): CharState {
@@ -100,7 +126,15 @@ export default function TypingTestModal({
 
   return (
     <div className="wv-tt-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="wv-tt-modal" role="dialog" aria-modal="true" onMouseDown={() => inputRef.current?.focus()}>
+      <div
+        ref={modalRef}
+        className="wv-tt-modal"
+        role="dialog"
+        aria-modal="true"
+        tabIndex={0}
+        onKeyDown={handleKey}
+        onMouseDown={() => modalRef.current?.focus()}
+      >
         <div className="wv-tt-head">
           <div className="wv-tt-title">Typing speed test</div>
           <button type="button" className="wv-btn wv-btn--ghost" onClick={onClose}>Close</button>
@@ -140,23 +174,11 @@ export default function TypingTestModal({
           <div className="wv-tt-stat"><span className="wv-tt-err">{mistakes}</span><label>Errors</label></div>
         </div>
 
-        <div className="wv-tt-display" onMouseDown={() => inputRef.current?.focus()}>
+        <div className="wv-tt-display">
           {chars.map((c, i) => (
             <span key={i} className={"wv-tt-char wv-tt-char--" + charStateAt(i)}>{c}</span>
           ))}
         </div>
-
-        <textarea
-          ref={inputRef}
-          className="wv-tt-input"
-          value={typed}
-          disabled={finished}
-          autoFocus
-          autoComplete="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          onChange={(e) => handleInput(e.target.value)}
-        />
 
         {finished ? (
           <div className="wv-tt-result">
