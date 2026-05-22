@@ -247,7 +247,10 @@ export default function Onboarding() {
     return (
       <div className="wv-onboarding-wrap">
         <div className="wv-onboarding-card wv-tour-card">
-          <Tutorial onDone={() => void getCurrentWindow().hide()} />
+          <Tutorial
+            onDone={() => void getCurrentWindow().hide()}
+            shortcuts={{ record: shortcut, quickSwitcher: quickSwitcherShortcut }}
+          />
         </div>
       </div>
     );

@@ -1,18 +1,24 @@
 import { useState, type ReactNode } from "react";
 import { Button } from "../ui/controls";
 
+type Shortcuts = { record: string; quickSwitcher: string };
+type VisualProps = { shortcuts: Shortcuts };
+
+const DEFAULT_SHORTCUTS: Shortcuts = { record: "Ctrl", quickSwitcher: "Ctrl+Shift+Space" };
+
 type TourStep = {
   id: string;
   title: string;
   body: string;
-  Visual: () => ReactNode;
+  // Functions with fewer params are assignable here — unused visuals can omit the arg.
+  Visual: (p: VisualProps) => ReactNode;
   imageSrc?: string;
 };
 
-function DictationVisual() {
+function DictationVisual({ shortcuts }: VisualProps) {
   return (
     <div className="wv-tv">
-      <span className="wv-tv-key">Ctrl</span>
+      <span className="wv-tv-key">{shortcuts.record}</span>
       <div className="wv-tv-wave">
         {[0, 1, 2, 3, 4, 5, 6].map((n) => (
           <span key={n} style={{ animationDelay: `${n * 0.09}s` }} />
@@ -23,15 +29,16 @@ function DictationVisual() {
   );
 }
 
-function ToolbarVisual() {
+function ToolbarVisual({ shortcuts }: VisualProps) {
   return (
-    <div className="wv-tv">
+    <div className="wv-tv" style={{ flexDirection: "column", gap: 20 }}>
       <div className="wv-tv-pill">
         <span className="wv-tv-rec" />
         <span className="wv-tv-bar" />
         <span className="wv-tv-bar" />
         <span className="wv-tv-dot" />
       </div>
+      <span className="wv-tv-key">{shortcuts.quickSwitcher}</span>
     </div>
   );
 }
@@ -113,7 +120,13 @@ const TOUR_STEPS: TourStep[] = [
   },
 ];
 
-export default function Tutorial({ onDone }: { onDone: () => void }) {
+export default function Tutorial({
+  onDone,
+  shortcuts = DEFAULT_SHORTCUTS,
+}: {
+  onDone: () => void;
+  shortcuts?: Shortcuts;
+}) {
   const [i, setI] = useState(0);
   const step = TOUR_STEPS[i];
   const last = i === TOUR_STEPS.length - 1;
@@ -127,7 +140,7 @@ export default function Tutorial({ onDone }: { onDone: () => void }) {
         {step.imageSrc ? (
           <img className="wv-tour-img" src={step.imageSrc} alt={step.title} />
         ) : (
-          <Visual />
+          <Visual shortcuts={shortcuts} />
         )}
       </div>
 
