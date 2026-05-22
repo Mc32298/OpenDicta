@@ -1293,12 +1293,6 @@ async fn set_shortcut_binding(
         if s.len() > 64 {
             return Err("Shortcut too long".to_string());
         }
-        if is_modifier_only_shortcut(s) {
-            return Err(
-                "Modifier-only shortcuts are not supported here. Use a non-modifier key or a combo like Ctrl+Shift+Space."
-                    .to_string(),
-            );
-        }
         let main_shortcut = state.shortcut.lock().unwrap().clone();
         if s == &main_shortcut {
             return Err("That shortcut is already used by Record toggle".to_string());
