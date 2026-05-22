@@ -26,6 +26,12 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Build worker binary
+        run: cargo build --release -p opendicta-worker
+
+      - name: Stage worker for externalBin
+        run: node scripts/copy-worker.mjs
+
       - name: Build and publish Tauri release
         uses: tauri-apps/tauri-action@v0
         env:
