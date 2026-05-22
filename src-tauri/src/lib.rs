@@ -2568,7 +2568,7 @@ fn open_onboarding(app: &AppHandle) {
             tauri::WebviewUrl::App("/?window=onboarding".into()),
         )
         .title("OpenDicta Setup")
-        .inner_size(760.0, 520.0)
+        .inner_size(760.0, 620.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
