@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button, Notice, StatusBadge } from "../ui/controls";
 import { DEFAULT_SHORTCUT, normalizeShortcutFromEvent } from "../lib/shortcutUtils";
 import { DEFAULT_PREFS, PREFS_KEY, type Prefs } from "../shell/prefs";
+import TypingTestModal from "./TypingTestModal";
 
 type OnboardingState = {
   completed: boolean;
@@ -52,6 +53,7 @@ export default function Onboarding() {
   const [wpm, setWpm] = useState(40);
   const [modelInstalled, setModelInstalled] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
+  const [testOpen, setTestOpen] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -288,6 +290,14 @@ export default function Onboarding() {
                   </button>
                 ))}
               </div>
+              <button
+                type="button"
+                className="wv-btn"
+                style={{ alignSelf: "flex-start" }}
+                onClick={() => setTestOpen(true)}
+              >
+                Test my typing speed
+              </button>
               <span className="wv-note">Not sure? The average is around 40 wpm. You can always change it later in Settings.</span>
             </div>
           )}
@@ -326,6 +336,16 @@ export default function Onboarding() {
               <Button variant="primary" disabled={busy || !modelInstalled} onClick={() => void finish()}>Finish</Button>
             )}
           </div>
+
+          <TypingTestModal
+            open={testOpen}
+            onClose={() => setTestOpen(false)}
+            onComplete={(measured) => {
+              setWpm(measured);
+              setTestOpen(false);
+              setStatus({ tone: "ok", text: `Measured ${measured} wpm from the test.` });
+            }}
+          />
         </div>
       </div>
     </div>
