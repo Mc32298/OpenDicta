@@ -144,7 +144,12 @@ export function readStoredUpdateState(): UpdateState {
     const raw = localStorage.getItem(UPDATE_STATE_KEY);
     if (!raw) return createInitialUpdateState();
     const parsed = JSON.parse(raw) as Partial<UpdateState>;
-    return { ...createInitialUpdateState(), ...parsed };
+    const state = { ...createInitialUpdateState(), ...parsed };
+    // Transient phases can't survive a restart — reset them to idle
+    if (state.phase === "checking" || state.phase === "downloading" || state.phase === "ready") {
+      return createInitialUpdateState();
+    }
+    return state;
   } catch {
     return createInitialUpdateState();
   }
