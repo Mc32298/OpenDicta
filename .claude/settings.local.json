@@ -49,7 +49,15 @@
       "Bash(del \"C:\\\\Users\\\\MathiasNielsen-SPINO\\\\Downloads\\\\Projects\\\\VoiceNote_V5\\\\voicenote\\\\src\\\\windows\\\\settingsTypes.ts\")",
       "Skill(anthropic-skills:vibe-coding-expert)",
       "Skill(anthropic-skills:vibe-coding-expert:*)",
-      "Bash(cargo test *)"
+      "Bash(cargo test *)",
+      "Bash(ls .claude/launch.json)",
+      "Bash(cat .claude/launch.json)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(ls src/shell)",
+      "Bash(ls public *)",
+      "Bash(ls src/assets)",
+      "Bash(cat .superpowers/brainstorm/1524-1779458490/state/server-info)",
+      "Bash(grep -q \".superpowers\" .gitignore)"
     ],
     "additionalDirectories": [
       "C:\\Users\\MathiasNielsen-SPINO\\AppData\\Roaming\\com.voicenote.app\\models\\parakeet"

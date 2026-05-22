@@ -1237,6 +1237,7 @@ async fn complete_onboarding(
 
 #[tauri::command]
 async fn start_tutorial(app: AppHandle) -> Result<(), String> {
+    hide_voicebar(&app);
     if let Some(win) = app.get_webview_window("onboarding") {
         // show/focus errors are non-fatal — event fires regardless
         let _ = win.show();
@@ -1252,7 +1253,7 @@ async fn start_tutorial(app: AppHandle) -> Result<(), String> {
         .inner_size(820.0, 660.0)
         .resizable(false)
         .decorations(false)
-        .transparent(true)
+        .transparent(false)
         .center()
         .build()
         .map_err(|e| e.to_string())?;
@@ -2527,6 +2528,7 @@ fn show_voicebar(app: &AppHandle) {
         if let Some(state) = app.try_state::<SharedState>() {
             state.voicebar_visible.store(true, Ordering::SeqCst);
         }
+        let _ = win.show();
         // Set a data attribute directly on <html> so the voicebar becomes visible
         // immediately — even before the React event listener has been registered
         // with the Tauri backend. The CSS rule :root[data-vb="1"] overrides the
@@ -2547,6 +2549,7 @@ fn hide_voicebar(app: &AppHandle) {
         // SAFETY: eval() string is hardcoded; no user input is interpolated here.
         let _ = win.eval("document.documentElement.removeAttribute('data-vb');");
         let _ = win.emit("voicebar-hide", ());
+        let _ = win.hide();
     }
 }
 
@@ -2580,6 +2583,7 @@ fn open_settings(app: &AppHandle) {
 }
 
 fn open_onboarding(app: &AppHandle) {
+    hide_voicebar(app);
     if let Some(win) = app.get_webview_window("onboarding") {
         let _ = win.show();
         let _ = win.set_focus();
@@ -2593,7 +2597,7 @@ fn open_onboarding(app: &AppHandle) {
         .inner_size(760.0, 620.0)
         .resizable(false)
         .decorations(false)
-        .transparent(true)
+        .transparent(false)
         .center()
         .build();
     }
@@ -4198,11 +4202,11 @@ pub fn run() {
                 }
             }
 
-            // Keep the voicebar as a non-focusable overlay so shortcut usage
-            // does not steal focus from the user's active text field.
+            // Keep the voicebar non-focusable so shortcut usage does not steal
+            // focus. It stays hidden until recording starts; otherwise the
+            // transparent always-on-top window can intercept onboarding clicks.
             if let Some(win) = app.get_webview_window("voicebar") {
                 let _ = win.set_focusable(false);
-                let _ = win.show();
             }
 
             // Log the worker binary path so it's easy to diagnose missing-binary issues.

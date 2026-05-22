@@ -20,11 +20,11 @@ export function normalizeShortcutFromEvent(e: KeyboardEvent): string | null {
 
   let base: string | null = null;
   // Use layout-aware printable keys first so Nordic layouts capture expected symbols.
-  if (key && key.length === 1) base = key.toUpperCase();
+  if (code === "Space") base = "Space";
+  else if (key && key.length === 1 && key !== " ") base = key.toUpperCase();
   else if (/^Key[A-Z]$/.test(code)) base = code.slice(3);
   else if (/^Digit[0-9]$/.test(code)) base = code.slice(5);
   else if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) base = code;
-  else if (code === "Space") base = "Space";
   else if (code === "Enter") base = "Enter";
   else if (code === "Escape") base = "Esc";
   else if (code === "Backspace") base = "Backspace";

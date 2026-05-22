@@ -4,7 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { Button, Notice, StatusBadge } from "../ui/controls";
-import { DEFAULT_SHORTCUT, normalizeShortcutFromEvent } from "../lib/shortcutUtils";
+import { DEFAULT_SHORTCUT } from "../lib/shortcutUtils";
+import { createShortcutCapture } from "../lib/shortcutCapture";
 import { DEFAULT_PREFS, PREFS_KEY, type Prefs } from "../shell/prefs";
 import TypingTestModal from "./TypingTestModal";
 import Tutorial from "./Tutorial";
@@ -67,6 +68,7 @@ export default function Onboarding() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [captureTarget, setCaptureTarget] = useState<ShortcutTarget | null>(null);
+  const [capturePreview, setCapturePreview] = useState<string | null>(null);
   const [status, setStatus] = useState<{ tone: "info" | "ok" | "err" | "warn"; text: string }>({
     tone: "info",
     text: "Setting up OpenDicta...",
@@ -106,17 +108,27 @@ export default function Onboarding() {
   useEffect(() => {
     invoke("set_shortcut_capture_mode", { enabled: Boolean(captureTarget) }).catch(console.error);
     if (!captureTarget) return;
+    const capture = createShortcutCapture();
     const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
-      const normalized = normalizeShortcutFromEvent(e);
-      if (!normalized) return;
+      const preview = capture.keyDown(e);
+      if (preview) setCapturePreview(preview);
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      e.preventDefault();
+      const captured = capture.keyUp(e);
+      if (!captured) return;
+      setCapturePreview(null);
       setCaptureTarget(null);
-      setStatus({ tone: "info", text: `Captured shortcut: ${normalized}. Saving...` });
-      void saveShortcut(captureTarget, normalized);
+      setStatus({ tone: "info", text: `Captured shortcut: ${captured}. Saving...` });
+      void saveShortcut(captureTarget, captured);
     };
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      capture.reset();
       invoke("set_shortcut_capture_mode", { enabled: false }).catch(console.error);
     };
   }, [captureTarget]);
@@ -304,28 +316,31 @@ export default function Onboarding() {
                   label="Record toggle"
                   hint="Press once to start, press again to stop."
                   value={shortcut}
+                  preview={captureTarget === "record" ? capturePreview : null}
                   active={captureTarget === "record"}
                   disabled={busy || (captureTarget !== null && captureTarget !== "record")}
-                  onCapture={() => setCaptureTarget("record")}
-                  onCancel={() => setCaptureTarget(null)}
+                  onCapture={() => { setCapturePreview(null); setCaptureTarget("record"); }}
+                  onCancel={() => { setCapturePreview(null); setCaptureTarget(null); }}
                 />
                 <ShortcutCaptureRow
                   label="Push-to-talk"
                   hint="Hold while speaking, release to stop."
                   value={pushToTalkShortcut}
+                  preview={captureTarget === "pushToTalk" ? capturePreview : null}
                   active={captureTarget === "pushToTalk"}
                   disabled={busy || (captureTarget !== null && captureTarget !== "pushToTalk")}
-                  onCapture={() => setCaptureTarget("pushToTalk")}
-                  onCancel={() => setCaptureTarget(null)}
+                  onCapture={() => { setCapturePreview(null); setCaptureTarget("pushToTalk"); }}
+                  onCancel={() => { setCapturePreview(null); setCaptureTarget(null); }}
                 />
                 <ShortcutCaptureRow
                   label="Quick switch"
                   hint="Open the model / style switcher palette."
                   value={quickSwitcherShortcut}
+                  preview={captureTarget === "quickSwitcher" ? capturePreview : null}
                   active={captureTarget === "quickSwitcher"}
                   disabled={busy || (captureTarget !== null && captureTarget !== "quickSwitcher")}
-                  onCapture={() => setCaptureTarget("quickSwitcher")}
-                  onCancel={() => setCaptureTarget(null)}
+                  onCapture={() => { setCapturePreview(null); setCaptureTarget("quickSwitcher"); }}
+                  onCancel={() => { setCapturePreview(null); setCaptureTarget(null); }}
                 />
               </div>
             </div>
@@ -363,8 +378,7 @@ export default function Onboarding() {
               </div>
               <button
                 type="button"
-                className="wv-btn"
-                style={{ alignSelf: "flex-start" }}
+                className="wv-btn wv-typing-test-button"
                 onClick={() => setTestOpen(true)}
               >
                 Test my typing speed
@@ -450,6 +464,7 @@ function ShortcutCaptureRow({
   label,
   hint,
   value,
+  preview,
   active,
   disabled,
   onCapture,
@@ -458,6 +473,7 @@ function ShortcutCaptureRow({
   label: string;
   hint: string;
   value: string;
+  preview: string | null;
   active: boolean;
   disabled: boolean;
   onCapture: () => void;
@@ -469,7 +485,7 @@ function ShortcutCaptureRow({
         <div className="wv-shortcut-label">{label}</div>
         <div className="wv-shortcut-hint">{active ? "Press the new shortcut now." : hint}</div>
       </div>
-      <span className="wv-kbd">{value}</span>
+      <span className="wv-kbd">{preview || value}</span>
       {active ? (
         <button type="button" className="wv-btn wv-btn-ghost" onClick={onCancel} disabled={disabled}>Cancel</button>
       ) : (

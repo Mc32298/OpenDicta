@@ -1,5 +1,6 @@
 // src/windows/TypingTestModal.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { netWpm, accuracyPct, clampWpm } from "../lib/typingStats";
 import { pickSample, type SampleLang, type SampleLength } from "../lib/typingSamples";
 
@@ -124,7 +125,7 @@ export default function TypingTestModal({
 
   if (!open) return null;
 
-  return (
+  return createPortal((
     <div className="wv-tt-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div
         ref={modalRef}
@@ -193,5 +194,5 @@ export default function TypingTestModal({
         )}
       </div>
     </div>
-  );
+  ), document.body);
 }

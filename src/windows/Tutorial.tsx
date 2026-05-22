@@ -31,12 +31,39 @@ function DictationVisual({ shortcuts }: VisualProps) {
 
 function ToolbarVisual({ shortcuts }: VisualProps) {
   return (
-    <div className="wv-tv" style={{ flexDirection: "column", gap: 20 }}>
-      <div className="wv-tv-pill">
-        <span className="wv-tv-rec" />
-        <span className="wv-tv-bar" />
-        <span className="wv-tv-bar" />
-        <span className="wv-tv-dot" />
+    <div className="wv-tv" style={{ flexDirection: "column", gap: 18 }}>
+      <div className="wv-tv-quick">
+        <div className="wv-tv-quick-search">Switch model or style...</div>
+        <div className="wv-tv-quick-list">
+          <div className="wv-tv-quick-item wv-tv-quick-item-on">
+            <span className="wv-tv-quick-name">
+              Parakeet V3
+              <span className="wv-tv-quick-active">active</span>
+            </span>
+            <span className="wv-tv-quick-kind">model</span>
+          </div>
+          <div className="wv-tv-quick-item">
+            <span className="wv-tv-quick-name">
+              Raw transcript
+              <span className="wv-tv-quick-active">active</span>
+            </span>
+            <span className="wv-tv-quick-kind">style</span>
+          </div>
+          {[
+            "Fix grammar",
+            "Email",
+            "Prompt engineering",
+            "Professional + todo",
+            "Bullet points",
+            "Slack message",
+            "TL;DR summary",
+          ].map((name) => (
+            <div key={name} className="wv-tv-quick-item">
+              <span className="wv-tv-quick-name">{name}</span>
+              <span className="wv-tv-quick-kind">style</span>
+            </div>
+          ))}
+        </div>
       </div>
       <span className="wv-tv-key">{shortcuts.quickSwitcher}</span>
     </div>
@@ -56,9 +83,52 @@ function ModelsVisual() {
 function AiVisual() {
   return (
     <div className="wv-tv wv-tv-ai">
-      <div className="wv-tv-raw">um, so like, the report is, uh, done</div>
-      <div className="wv-tv-arrow">→</div>
-      <div className="wv-tv-clean">The report is done. <span className="wv-tv-spark">✦</span></div>
+      <div className="wv-tv-ai-source">
+        <div className="wv-tv-ai-label">You spoke</div>
+        <div className="wv-tv-raw">
+          uh so today i'm gonna work on the transcript editor we talked about
+          yesterday and i need to follow up with mark about latency and send the
+          design review notes before standup tomorrow
+        </div>
+      </div>
+      <div className="wv-tv-ai-scroll">
+        <div className="wv-tv-ai-grid">
+          <div className="wv-tv-ai-card">
+            <div className="wv-tv-ai-card-title">Fix grammar</div>
+            <div className="wv-tv-clean">Today I&apos;m working on the transcript editor, following up with Mark about latency, and sending the design review notes before tomorrow&apos;s standup. <span className="wv-tv-spark">✦</span></div>
+          </div>
+          <div className="wv-tv-ai-card">
+            <div className="wv-tv-ai-card-title">Bullet points</div>
+            <ul className="wv-tv-ai-list">
+              <li>Work on the transcript editor</li>
+              <li>Follow up with Mark on latency</li>
+              <li>Send design review notes before standup</li>
+            </ul>
+          </div>
+          <div className="wv-tv-ai-card">
+            <div className="wv-tv-ai-card-title">Email</div>
+            <div className="wv-tv-clean">
+              Subject: Transcript editor update
+              {"\n\n"}
+              Hi team, I&apos;m working on the transcript editor today, following up with Mark on latency, and sending design review notes before standup tomorrow.
+            </div>
+          </div>
+          <div className="wv-tv-ai-card">
+            <div className="wv-tv-ai-card-title">Prompt engineering</div>
+            <div className="wv-tv-clean">
+              Prompt:
+              {"\n"}
+              Summarize the latency issue, list blockers, and suggest the next two engineering steps.
+            </div>
+          </div>
+          <div className="wv-tv-ai-card">
+            <div className="wv-tv-ai-card-title">Slack message</div>
+            <div className="wv-tv-clean">
+              Heads-up: I&apos;m on the transcript editor today. I&apos;ll ping Mark about latency and send the design notes before standup. ✅
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -134,8 +204,6 @@ export default function Tutorial({
 
   return (
     <div className="wv-tour">
-      <Button variant="ghost" className="wv-tour-skip" onClick={onDone}>Skip tour</Button>
-
       <div className="wv-tour-stage" key={step.id}>
         {step.imageSrc ? (
           <img className="wv-tour-img" src={step.imageSrc} alt={step.title} />
@@ -157,6 +225,7 @@ export default function Tutorial({
           ))}
         </div>
         <div className="wv-tour-nav">
+          <Button variant="ghost" className="wv-tour-skip" onClick={onDone}>Skip tour</Button>
           <Button variant="ghost" disabled={i === 0} onClick={() => setI((n) => Math.max(0, n - 1))}>
             Back
           </Button>
