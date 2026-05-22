@@ -1232,8 +1232,29 @@ async fn complete_onboarding(
 ) -> Result<(), String> {
     state.onboarding_completed.store(true, Ordering::SeqCst);
     save_app_settings(&app, state.inner().clone())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_tutorial(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("onboarding") {
-        let _ = win.hide();
+        let _ = win.emit("start-tutorial", ());
+        let _ = win.show();
+        let _ = win.set_focus();
+    } else {
+        tauri::WebviewWindowBuilder::new(
+            &app,
+            "onboarding",
+            tauri::WebviewUrl::App("/?window=onboarding&phase=tour".into()),
+        )
+        .title("OpenDicta")
+        .inner_size(820.0, 660.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -4145,6 +4166,7 @@ pub fn run() {
             get_voicebar_visible,
             get_onboarding_state,
             complete_onboarding,
+            start_tutorial,
             open_settings_page_command,
             open_empty_state,
             get_autostart_enabled,
