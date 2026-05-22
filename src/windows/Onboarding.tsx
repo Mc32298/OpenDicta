@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { Button, Notice, StatusBadge } from "../ui/controls";
 import { DEFAULT_SHORTCUT, normalizeShortcutFromEvent } from "../lib/shortcutUtils";
 import { DEFAULT_PREFS, PREFS_KEY, type Prefs } from "../shell/prefs";
 import TypingTestModal from "./TypingTestModal";
+import Tutorial from "./Tutorial";
 
 type OnboardingState = {
   completed: boolean;
@@ -38,8 +40,30 @@ const STEP_STATUS: Array<{ tone: "info" | "warn"; text: string }> = [
   { tone: "info", text: "Install the local model required for transcription." },
 ];
 
+const STEPS: Array<{ title: string; rail: string }> = [
+  { title: "Welcome", rail: "Welcome" },
+  { title: "Choose Shortcuts", rail: "Shortcuts" },
+  { title: "Your Typing Speed", rail: "Typing speed" },
+  { title: "Install Model", rail: "Install model" },
+];
+
 export default function Onboarding() {
   const [step, setStep] = useState(0);
+  const [phase, setPhase] = useState<"setup" | "tour">(
+    () => (new URLSearchParams(window.location.search).get("phase") === "tour" ? "tour" : "setup"),
+  );
+
+  const enterTour = async () => {
+    try {
+      const win = getCurrentWindow();
+      await win.setSize(new LogicalSize(820, 660));
+      await win.center();
+    } catch (e) {
+      console.error(e);
+    }
+    setPhase("tour");
+  };
+
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [captureTarget, setCaptureTarget] = useState<ShortcutTarget | null>(null);
@@ -126,6 +150,13 @@ export default function Onboarding() {
     });
   }, [step]);
 
+  useEffect(() => {
+    if (phase === "tour") void enterTour();
+    const un = listen("start-tutorial", () => { void enterTour(); });
+    return () => { void un.then((fn) => fn()); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const saveShortcut = async (target: ShortcutTarget, candidate: string) => {
     setBusy(true);
     try {
@@ -178,7 +209,7 @@ export default function Onboarding() {
     setBusy(true);
     try {
       await invoke("complete_onboarding");
-      await getCurrentWindow().hide();
+      await enterTour();
     } catch (e) {
       setStatus({ tone: "err", text: `Failed to complete onboarding: ${String(e)}` });
     } finally {
@@ -209,24 +240,42 @@ export default function Onboarding() {
   };
 
   if (loading) {
-    return <div className="wv-onboarding-wrap"><div className="wv-onboarding"><div className="wv-onboarding-body"><p>Loading...</p></div></div></div>;
+    return <div className="wv-onboarding-wrap"><div className="wv-onboarding-card"><main className="wv-onboarding-main"><p>Loading...</p></main></div></div>;
+  }
+
+  if (phase === "tour") {
+    return (
+      <div className="wv-onboarding-wrap">
+        <div className="wv-onboarding-card wv-tour-card">
+          <Tutorial onDone={() => void getCurrentWindow().hide()} />
+        </div>
+      </div>
+    );
   }
 
   return (
     <div className="wv-onboarding-wrap">
-      <div className="wv-onboarding">
-        <div className="wv-onboarding-body">
-          <div className="wv-onboarding-title-row">
-            <div className="wv-chrome-title">OpenDicta Setup</div>
-            <button type="button" className="wv-btn wv-btn-ghost" onClick={() => void getCurrentWindow().hide()}>Close</button>
-          </div>
+      <div className="wv-onboarding-card">
+        <aside className="wv-onboarding-rail">
+          <div className="wv-rail-brand">OpenDicta</div>
+          <ol className="wv-stepper">
+            {STEPS.map((s, i) => (
+              <li
+                key={s.rail}
+                className="wv-stepper-item"
+                data-state={i === step ? "active" : i < step ? "done" : "todo"}
+              >
+                <span className="wv-stepper-dot">{i < step ? "✓" : i + 1}</span>
+                <span className="wv-stepper-label">{s.rail}</span>
+              </li>
+            ))}
+          </ol>
+          <div className="wv-rail-foot">Local-first dictation. Your audio is transcribed on-device and never leaves your machine.</div>
+        </aside>
+        <main className="wv-onboarding-main">
           <div className="wv-onboarding-step">Step {step + 1} of 4</div>
-          <h1>
-            {step === 0 && "Welcome"}
-            {step === 1 && "Choose Shortcuts"}
-            {step === 2 && "Your Typing Speed"}
-            {step === 3 && "Install Model"}
-          </h1>
+          <h1>{STEPS[step].title}</h1>
+          <div className="wv-onboarding-content">
           {step === 0 && (
             <div className="wv-inline wv-inline-stack">
               <p>OpenDicta records while you hold a shortcut, then transcribes locally and pastes into your active app.</p>
@@ -343,6 +392,7 @@ export default function Onboarding() {
               )}
             </div>
           )}
+          </div>
 
           <Notice tone={status.tone}>{status.text}</Notice>
 
@@ -365,7 +415,7 @@ export default function Onboarding() {
               setStatus({ tone: "ok", text: `Measured ${measured} wpm from the test.` });
             }}
           />
-        </div>
+        </main>
       </div>
     </div>
   );
