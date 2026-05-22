@@ -11,7 +11,7 @@ type TourStep = {
 
 function DictationVisual() {
   return (
-    <div className="wv-tv wv-tv-dictation">
+    <div className="wv-tv">
       <span className="wv-tv-key">Ctrl</span>
       <div className="wv-tv-wave">
         {[0, 1, 2, 3, 4, 5, 6].map((n) => (
@@ -25,7 +25,7 @@ function DictationVisual() {
 
 function ToolbarVisual() {
   return (
-    <div className="wv-tv wv-tv-toolbar">
+    <div className="wv-tv">
       <div className="wv-tv-pill">
         <span className="wv-tv-rec" />
         <span className="wv-tv-bar" />
@@ -68,7 +68,7 @@ function InsightsVisual() {
 
 function WrapVisual() {
   return (
-    <div className="wv-tv wv-tv-wrap">
+    <div className="wv-tv">
       <div className="wv-tv-check">✓</div>
     </div>
   );
