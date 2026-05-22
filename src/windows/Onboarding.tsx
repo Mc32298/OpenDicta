@@ -17,9 +17,10 @@ type OnboardingState = {
 type ShortcutBindings = {
   record: string;
   push_to_talk: string | null;
+  quick_switcher: string | null;
 };
 
-type ShortcutTarget = "record" | "pushToTalk";
+type ShortcutTarget = "record" | "pushToTalk" | "quickSwitcher";
 
 type DownloadProgressEvent = {
   model_id: string;
@@ -49,6 +50,7 @@ export default function Onboarding() {
 
   const [shortcut, setShortcut] = useState(DEFAULT_SHORTCUT);
   const [pushToTalkShortcut, setPushToTalkShortcut] = useState("F6");
+  const [quickSwitcherShortcut, setQuickSwitcherShortcut] = useState("Ctrl+Shift+Space");
   const [userName, setUserName] = useState("");
   const [wpm, setWpm] = useState(40);
   const [modelInstalled, setModelInstalled] = useState(false);
@@ -65,6 +67,7 @@ export default function Onboarding() {
         if (bindings) {
           setShortcut(bindings.record || state.shortcut || DEFAULT_SHORTCUT);
           setPushToTalkShortcut(bindings.push_to_talk || "F6");
+          setQuickSwitcherShortcut(bindings.quick_switcher || "Ctrl+Shift+Space");
         }
         setUserName(loadStoredUserName());
         setStatus({ tone: "info", text: "Welcome. Let’s configure your setup." });
@@ -137,9 +140,16 @@ export default function Onboarding() {
         return;
       }
 
-      await invoke("set_shortcut_binding", { action: "push_to_talk", shortcut: candidate });
-      setPushToTalkShortcut(candidate);
-      setStatus({ tone: "ok", text: `Push-to-talk saved: ${candidate}` });
+      if (target === "pushToTalk") {
+        await invoke("set_shortcut_binding", { action: "push_to_talk", shortcut: candidate });
+        setPushToTalkShortcut(candidate);
+        setStatus({ tone: "ok", text: `Push-to-talk saved: ${candidate}` });
+        return;
+      }
+
+      await invoke("set_shortcut_binding", { action: "quick_switcher", shortcut: candidate });
+      setQuickSwitcherShortcut(candidate);
+      setStatus({ tone: "ok", text: `Quick switch saved: ${candidate}` });
     } catch (e) {
       setStatus({ tone: "err", text: `Failed to save shortcut: ${String(e)}` });
     } finally {
@@ -254,6 +264,15 @@ export default function Onboarding() {
                   active={captureTarget === "pushToTalk"}
                   disabled={busy || (captureTarget !== null && captureTarget !== "pushToTalk")}
                   onCapture={() => setCaptureTarget("pushToTalk")}
+                  onCancel={() => setCaptureTarget(null)}
+                />
+                <ShortcutCaptureRow
+                  label="Quick switch"
+                  hint="Open the model / style switcher palette."
+                  value={quickSwitcherShortcut}
+                  active={captureTarget === "quickSwitcher"}
+                  disabled={busy || (captureTarget !== null && captureTarget !== "quickSwitcher")}
+                  onCapture={() => setCaptureTarget("quickSwitcher")}
                   onCancel={() => setCaptureTarget(null)}
                 />
               </div>
