@@ -433,6 +433,16 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
                 }}
               />
             </Setting>
+            <Divider />
+            <Setting label="Getting started tour" desc="Replay the welcome walkthrough." icon={<SparkleIcon style={{ width: 18, height: 18 }} />}>
+              <button
+                className="btn btn-sm"
+                type="button"
+                onClick={() => { invoke("start_tutorial").catch((err) => toast.showErr(`Could not open tour: ${errorText(err)}`)); }}
+              >
+                Replay
+              </button>
+            </Setting>
           </div>
 
           <div className="card card-lg">
