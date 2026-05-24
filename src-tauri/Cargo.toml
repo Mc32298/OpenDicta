@@ -3,7 +3,7 @@ name = "opendicta"
 version = "0.1.7"
 description = "Push-to-talk speech-to-text app"
 authors = []
-edition = "2021"
+edition = "2026"
 
 # Required by Tauri — don't remove
 [lib]
