@@ -3,7 +3,7 @@ name = "opendicta"
 version = "0.1.7"
 description = "Push-to-talk speech-to-text app"
 authors = []
-edition = "2026"
+edition = "2021"
 
 # Required by Tauri — don't remove
 [lib]
@@ -33,20 +33,21 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 
 # Audio capture — cross-platform microphone input
-cpal = "0.15"
+cpal = "0.17"
 
 # WAV file writing — saves recorded audio before sending to sidecar
 hound = "3.5"
 
 # Simulate keyboard input for auto-paste (Cmd+V / Ctrl+V)
-enigo = "0.2"
+enigo = "0.6"
 
 # HTTP client for model file downloads (async, follows redirects, HTTPS)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 futures-util = "0.3"
-sha2 = "0.10"
-rubato = "0.16"
-keyring = "3"
+sha2 = "0.11"
+rubato = "3"
+keyring = "4"
+keyring-core = "1"
 semver = "1"
 
 [target.'cfg(windows)'.dependencies]

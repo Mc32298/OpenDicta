@@ -14,7 +14,7 @@ mod history;
 mod protected_store;
 
 use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+    Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -2247,23 +2247,23 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     }
 }
 
-fn hf_token_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.OpenDicta.app", "huggingface_token")
+fn hf_token_keyring_entry() -> Result<keyring_core::Entry, String> {
+    keyring_core::Entry::new("com.OpenDicta.app", "huggingface_token")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
-fn openai_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.OpenDicta.app", "openai_api_key")
+fn openai_keyring_entry() -> Result<keyring_core::Entry, String> {
+    keyring_core::Entry::new("com.OpenDicta.app", "openai_api_key")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
-fn gemini_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.OpenDicta.app", "gemini_api_key")
+fn gemini_keyring_entry() -> Result<keyring_core::Entry, String> {
+    keyring_core::Entry::new("com.OpenDicta.app", "gemini_api_key")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
-fn anthropic_keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("com.OpenDicta.app", "anthropic_api_key")
+fn anthropic_keyring_entry() -> Result<keyring_core::Entry, String> {
+    keyring_core::Entry::new("com.OpenDicta.app", "anthropic_api_key")
         .map_err(|e| format!("Keyring initialization failed: {}", e))
 }
 
@@ -2277,7 +2277,7 @@ fn ai_secret_file_path(app: &AppHandle, key: &str) -> Result<std::path::PathBuf,
     Ok(dir.join(format!("{key}.bin")))
 }
 
-fn load_secret(entry: Result<keyring::Entry, String>) -> Option<String> {
+fn load_secret(entry: Result<keyring_core::Entry, String>) -> Option<String> {
     let entry = entry.ok()?;
     match entry.get_password() {
         Ok(value) => {
@@ -2292,7 +2292,7 @@ fn load_secret(entry: Result<keyring::Entry, String>) -> Option<String> {
     }
 }
 
-fn save_secret(entry: Result<keyring::Entry, String>, value: Option<&str>) -> Result<(), String> {
+fn save_secret(entry: Result<keyring_core::Entry, String>, value: Option<&str>) -> Result<(), String> {
     let entry = entry?;
     match value {
         Some(secret) => entry
@@ -2300,7 +2300,7 @@ fn save_secret(entry: Result<keyring::Entry, String>, value: Option<&str>) -> Re
             .map_err(|e| format!("Failed to save token in keyring: {}", e)),
         None => match entry.delete_credential() {
             Ok(_) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(format!("Failed to delete token from keyring: {}", e)),
         },
     }
@@ -2309,7 +2309,7 @@ fn save_secret(entry: Result<keyring::Entry, String>, value: Option<&str>) -> Re
 fn save_ai_secret(
     app: &AppHandle,
     key: &str,
-    entry: Result<keyring::Entry, String>,
+    entry: Result<keyring_core::Entry, String>,
     value: Option<&str>,
 ) -> Result<(), String> {
     #[cfg(windows)]
@@ -2330,7 +2330,7 @@ fn save_ai_secret(
 fn load_ai_secret(
     app: &AppHandle,
     key: &str,
-    entry: Result<keyring::Entry, String>,
+    entry: Result<keyring_core::Entry, String>,
 ) -> Option<String> {
     #[cfg(windows)]
     {
@@ -2402,7 +2402,7 @@ async fn compute_sha256_hex(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..bytes]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 // ─── Window Helpers ───────────────────────────────────────────────────────────
@@ -2646,7 +2646,7 @@ fn start_audio_capture(
 
         // Store the actual sample rate and channel count so finalize_recording
         // knows how to interpret the buffer
-        let actual_rate = default_config.sample_rate().0;
+        let actual_rate = default_config.sample_rate();
         let actual_channels = default_config.channels();
         *sample_rate_out.lock().unwrap() = actual_rate;
         *channels_out.lock().unwrap() = actual_channels;
@@ -2783,16 +2783,19 @@ fn resample_to_16khz(samples: &[f32], from_rate: u32) -> Vec<f32> {
         window: WindowFunction::BlackmanHarris2,
     };
     let chunk = samples.len().max(1);
-    let mut resampler = match SincFixedIn::<f32>::new(ratio, 2.0, params, chunk, 1) {
+    let mut resampler = match Async::<f32>::new_sinc(ratio, 2.0, &params, chunk, 1, FixedAsync::Input) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Resampler init failed ({e}), using linear fallback");
             return resample_linear(samples, from_rate);
         }
     };
-    let waves_in = vec![samples.to_vec()];
-    match resampler.process(&waves_in, None) {
-        Ok(out) => out.into_iter().next().unwrap_or_default(),
+    let input = match rubato::audioadapter_buffers::direct::InterleavedSlice::new(samples, 1, samples.len()) {
+        Ok(a) => a,
+        Err(_) => return resample_linear(samples, from_rate),
+    };
+    match resampler.process(&input, 0, None) {
+        Ok(out) => out.take_data(),
         Err(e) => {
             eprintln!("Resampler process failed ({e}), using linear fallback");
             resample_linear(samples, from_rate)
@@ -3993,6 +3996,7 @@ fn setup_hotkey(app: &AppHandle, state: SharedState) -> Result<(), String> {
 // ─── App Entry Point ──────────────────────────────────────────────────────────
 
 pub fn run() {
+    let _ = keyring::use_native_store(false);
     let state: SharedState = Arc::new(AppState::new());
 
     tauri::Builder::default()
@@ -4347,7 +4351,7 @@ mod ai_settings_tests {
         let path = dir.join("tokens.txt");
         let content = b"voice note tokens";
         std::fs::write(&path, content).unwrap();
-        let expected_hash = format!("{:x}", Sha256::digest(content));
+        let expected_hash = Sha256::digest(content).iter().map(|b| format!("{:02x}", b)).collect::<String>();
         let spec = ModelFileSpec {
             name: "tokens.txt",
             expected_bytes: content.len() as u64,
