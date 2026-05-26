@@ -12,7 +12,6 @@ export default function VoiceBar() {
   const [state, setState]           = useState<State>("idle");
   const [visible, setVisible]       = useState(false);
   const [statusText, setStatusText] = useState("Ready");
-  const [lastError, setLastError]   = useState<string | null>(null);
   const [level, setLevel]           = useState(0);
   const [shortcut, setShortcut]     = useState("RCtrl");
   const [completionSound, setCompletionSound] = useState(false);
@@ -91,7 +90,6 @@ export default function VoiceBar() {
       setVisible(true);
       setState("recording");
       setStatusText("Listening…");
-      setLastError(null);
       if (completionSoundRef.current) playChime(660, 0.09, 0.09);
     });
 
@@ -115,7 +113,6 @@ export default function VoiceBar() {
     const unlistenDone = listen<{ text: string }>("transcript-ready", (event) => {
       clearHideTimers();
       setState("done");
-      setLastError(null);
       const warning = aiWarningRef.current;
       if (warning) {
         setStatusText(warning);
@@ -131,7 +128,6 @@ export default function VoiceBar() {
     const unlistenError = listen<{ message: string }>("transcription-error", (event) => {
       clearHideTimers();
       setState("error");
-      setLastError(event.payload.message);
       setStatusText(event.payload.message);
       errorHideTimerRef.current = window.setTimeout(hideAndReset, 2500);
     });
@@ -227,7 +223,6 @@ export default function VoiceBar() {
     clearHideTimers();
     setState("cancelled");
     setStatusText("Cancelled");
-    setLastError(null);
     setLevel(0);
     cancelHideTimerRef.current = window.setTimeout(hideAndReset, 700);
   }
@@ -243,7 +238,6 @@ export default function VoiceBar() {
     setStatusText("Ready");
     setVisible(false);
     setLevel(0);
-    setLastError(null);
     document.documentElement.removeAttribute("data-vb");
   }
 
@@ -300,7 +294,7 @@ export default function VoiceBar() {
           {isError && (
             <div className="pill-status">
               <div className="pill-alert"><AlertIcon /></div>
-              <span className="pill-status-text pill-status-text--error" title={lastError ?? statusText}>
+              <span className="pill-status-text pill-status-text--error" title={statusText}>
                 {statusText}
               </span>
             </div>
@@ -322,7 +316,7 @@ export default function VoiceBar() {
         </div>
 
         <div className="pill-actions">
-          {isError && lastError && (
+          {isError && (
             <IconButton className="pill-action" onClick={() => void openSettings()} label="Open diagnostics">
               <GearIcon />
             </IconButton>
