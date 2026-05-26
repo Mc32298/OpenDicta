@@ -1694,6 +1694,7 @@ async fn download_model(
                 .map_err(|e| format!("Write error for {}: {}", name, e))?;
             downloaded += chunk.len() as u64;
 
+            // 1024-byte slack for HTTP chunk-boundary overrun; exact-size verified post-download by SHA256.
             if downloaded > expected_size + 1024 {
                 let _ = tokio::fs::remove_file(&tmp).await;
                 return Err(format!(
@@ -4362,9 +4363,18 @@ mod ai_settings_tests {
         ];
         for (model, specs) in all {
             for spec in *specs {
+                let h = spec.sha256.unwrap_or_else(|| {
+                    panic!("missing sha256 for {model}/{}", spec.name)
+                });
+                assert_eq!(
+                    h.len(), 64,
+                    "sha256 for {model}/{} has wrong length {} (expected 64)",
+                    spec.name, h.len()
+                );
                 assert!(
-                    spec.sha256.is_some(),
-                    "missing sha256 for {model}/{}", spec.name
+                    h.chars().all(|c| c.is_ascii_hexdigit()),
+                    "sha256 for {model}/{} contains non-hex characters",
+                    spec.name
                 );
             }
         }
