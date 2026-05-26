@@ -1,9 +1,8 @@
 import { useState, useEffect, useMemo, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import PageHead from "./PageHead";
-import {
-  CopyIcon,
-} from "../ui/icons";
+import { CopyIcon } from "../ui/icons";
+import { MODEL_CATALOG, catalogName } from "../lib/catalog";
 
 interface DashboardStats {
   avg_wpm: number;
@@ -40,30 +39,6 @@ interface RecentSession {
 interface DashboardLatestData {
   latest: LatestTranscriptInfo | null;
   recent_sessions: RecentSession[];
-}
-
-function modelLabelFromId(modelId: string | null): string {
-  if (!modelId) return "Unknown";
-  switch (modelId) {
-    case "parakeet":
-      return "Parakeet V3";
-    case "canary_qwen_2_5b":
-      return "Canary Qwen 2.5B";
-    case "qwen3_asr":
-      return "Whisper Pro";
-    case "whisper_small":
-      return "Whisper Small";
-    case "whisper_medium":
-      return "Whisper Medium";
-    case "whisper_large":
-      return "Whisper Pro+";
-    case "whisper_large_v3_turbo":
-      return "Whisper MAX";
-    default:
-      return modelId
-        .replace(/_/g, " ")
-        .replace(/\b\w/g, (c) => c.toUpperCase());
-  }
 }
 
 function todayTrend(today: number, yesterday: number): string {
@@ -104,7 +79,8 @@ export default function Dashboard({ userName }: { userName: string }) {
   }, [stats]);
 
   const modelInUse = useMemo(() => {
-    return modelLabelFromId(activeModelId);
+    if (!activeModelId) return "Unknown";
+    return catalogName(MODEL_CATALOG, activeModelId);
   }, [activeModelId]);
 
   const sessionQuality = useMemo(() => {
