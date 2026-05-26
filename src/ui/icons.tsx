@@ -249,6 +249,5 @@ export const StopIcon = (p: IconProps) => (
   </svg>
 );
 
-// Aliases for back-compat with un-migrated windows.
-export const ActivityIcon = InsightsIcon;
+// Alias for back-compat with un-migrated windows.
 export const GearIcon = SettingsIcon;
