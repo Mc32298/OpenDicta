@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import PageHead from "./PageHead";
-import { normalizeShortcutFromEvent } from "../lib/shortcutUtils";
+import { createShortcutCapture } from "../lib/shortcutCapture";
 import { THEMES, usePrefs } from "../shell/prefs";
 import type { Prefs } from "../shell/prefs";
 import { useToast } from "../ui/toast";
@@ -170,24 +170,20 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   useEffect(() => {
     invoke("set_shortcut_capture_mode", { enabled: Boolean(editingShortcut) }).catch(console.error);
     if (!editingShortcut) return;
-    let activeKeys = new Set<string>();
-    let lastCaptured: string | null = null;
+
+    const capture = createShortcutCapture();
 
     const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
-      activeKeys.add(e.code || e.key);
-      const normalized = normalizeShortcutFromEvent(e);
-      if (!normalized) return;
-      lastCaptured = normalized;
-      setCapturePreview(normalized);
+      const normalized = capture.keyDown(e);
+      if (normalized) setCapturePreview(normalized);
     };
 
     const onKeyUp = async (e: KeyboardEvent) => {
       e.preventDefault();
-      activeKeys.delete(e.code || e.key);
-      if (activeKeys.size !== 0 || !lastCaptured) return;
+      const captured = capture.keyUp(e);
+      if (!captured) return;
 
-      const captured = lastCaptured;
       setCapturePreview(null);
       setEditingShortcut(null);
       setShortcuts((prev) => ({ ...prev, [editingShortcut]: captured }));
@@ -235,6 +231,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
+      capture.reset();
     };
   }, [editingShortcut]);
 
