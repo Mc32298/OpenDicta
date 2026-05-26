@@ -1849,13 +1849,13 @@ async fn get_audio_input_info(
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
 
-    let default_device = host.default_input_device().and_then(|d| d.name().ok());
+    let default_device = host.default_input_device().and_then(|d| d.description().map(|desc| desc.name().to_string()).ok());
 
     let mut devices = Vec::new();
     if let Ok(iter) = host.input_devices() {
         for d in iter {
-            if let Ok(name) = d.name() {
-                devices.push(name);
+            if let Ok(desc) = d.description() {
+                devices.push(desc.name().to_string());
             }
         }
     }
@@ -1884,7 +1884,7 @@ async fn test_microphone(
     let device = if let Some(ref name) = preferred_name {
         host.input_devices()
             .ok()
-            .and_then(|mut iter| iter.find(|d| d.name().ok().as_ref() == Some(name)))
+            .and_then(|mut iter| iter.find(|d| d.description().map(|desc| desc.name().to_string()).ok().as_deref() == Some(name)))
             .or_else(|| host.default_input_device())
     } else {
         host.default_input_device()
@@ -1900,7 +1900,7 @@ async fn test_microphone(
         }
     };
 
-    let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+    let device_name = device.description().map(|desc| desc.name().to_string()).unwrap_or_else(|_| "Unknown".to_string());
 
     let config = match device.default_input_config() {
         Ok(c) => c,
@@ -1956,11 +1956,9 @@ async fn set_audio_input_device(
         let mut found = false;
         if let Ok(iter) = host.input_devices() {
             for d in iter {
-                if let Ok(n) = d.name() {
-                    if &n == name {
-                        found = true;
-                        break;
-                    }
+                if d.description().map(|desc| desc.name().to_string()).ok().as_deref() == Some(name) {
+                    found = true;
+                    break;
                 }
             }
         }
@@ -2608,7 +2606,7 @@ fn start_audio_capture(
         let preferred_device = preferred_name.as_ref().and_then(|name| {
             host.input_devices()
                 .ok()?
-                .find(|d| d.name().ok().as_ref() == Some(name))
+                .find(|d| d.description().map(|desc| desc.name().to_string()).ok().as_deref() == Some(name))
         });
 
         let device = match preferred_device.or_else(|| host.default_input_device()) {
@@ -2623,10 +2621,9 @@ fn start_audio_capture(
                 return;
             }
         };
-        if let Ok(name) = device.name() {
-            println!("Using input device: {}", name);
-            let _ = app.emit("audio-device-selected", serde_json::json!({ "name": name }));
-        }
+        let name = device.description().map(|desc| desc.name().to_string()).unwrap_or_else(|_| "Unknown".to_string());
+        println!("Using input device: {}", name);
+        let _ = app.emit("audio-device-selected", serde_json::json!({ "name": name }));
 
         // Get the default supported config from the device.
         // We'll try to use 16kHz, but if not supported we capture at native
