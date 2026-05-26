@@ -1598,6 +1598,18 @@ async fn download_model(
 
     let client = reqwest::Client::builder()
         .user_agent("OpenDicta/0.1 (model-downloader)")
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let host = attempt.url().host_str().unwrap_or("").to_string();
+            if host == "huggingface.co"
+                || host.ends_with(".huggingface.co")
+                || host == "hf.co"
+                || host.ends_with(".hf.co")
+            {
+                attempt.follow()
+            } else {
+                attempt.error(format!("Redirect to untrusted host blocked: {host}"))
+            }
+        }))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -1681,6 +1693,14 @@ async fn download_model(
                 .await
                 .map_err(|e| format!("Write error for {}: {}", name, e))?;
             downloaded += chunk.len() as u64;
+
+            if downloaded > expected_size + 1024 {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(format!(
+                    "Download for {} exceeded expected size ({} bytes)",
+                    name, expected_size
+                ));
+            }
 
             let overall = ((idx as f64 + downloaded as f64 / content_length as f64)
                 / total_files as f64
