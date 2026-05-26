@@ -1352,8 +1352,8 @@ const WHISPER_SMALL_FILES: &[ModelFileSpec] = &[
     },
     ModelFileSpec {
         name: "small-tokens.txt",
-        expected_bytes: 800_000,
-        sha256: None,
+        expected_bytes: 816_730,
+        sha256: Some("b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"),
     },
 ];
 const WHISPER_SMALL_DOWNLOAD_BASES: &[&str] =
@@ -1373,8 +1373,8 @@ const WHISPER_MEDIUM_FILES: &[ModelFileSpec] = &[
     },
     ModelFileSpec {
         name: "medium-tokens.txt",
-        expected_bytes: 800_000,
-        sha256: None,
+        expected_bytes: 816_730,
+        sha256: Some("b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"),
     },
 ];
 const WHISPER_MEDIUM_DOWNLOAD_BASES: &[&str] =
@@ -1394,8 +1394,8 @@ const WHISPER_LARGE_FILES: &[ModelFileSpec] = &[
     },
     ModelFileSpec {
         name: "large-v2-tokens.txt",
-        expected_bytes: 800_000,
-        sha256: None,
+        expected_bytes: 816_730,
+        sha256: Some("b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"),
     },
 ];
 const WHISPER_LARGE_DOWNLOAD_BASES: &[&str] =
@@ -1415,8 +1415,8 @@ const WHISPER_TURBO_FILES: &[ModelFileSpec] = &[
     },
     ModelFileSpec {
         name: "turbo-tokens.txt",
-        expected_bytes: 800_000,
-        sha256: None,
+        expected_bytes: 816_730,
+        sha256: Some("b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"),
     },
 ];
 const WHISPER_TURBO_DOWNLOAD_BASES: &[&str] =
@@ -1441,18 +1441,18 @@ const QWEN3_ASR_FILES: &[ModelFileSpec] = &[
     },
     ModelFileSpec {
         name: "tokenizer/merges.txt",
-        expected_bytes: 1_600_000,
-        sha256: None,
+        expected_bytes: 1_671_853,
+        sha256: Some("8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"),
     },
     ModelFileSpec {
         name: "tokenizer/tokenizer_config.json",
-        expected_bytes: 10_000,
-        sha256: None,
+        expected_bytes: 12_487,
+        sha256: Some("4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c"),
     },
     ModelFileSpec {
         name: "tokenizer/vocab.json",
-        expected_bytes: 2_700_000,
-        sha256: None,
+        expected_bytes: 2_776_833,
+        sha256: Some("ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"),
     },
 ];
 const QWEN3_ASR_DOWNLOAD_BASES: &[&str] =
@@ -4331,12 +4331,22 @@ mod ai_settings_tests {
 
     #[test]
     fn model_specs_define_sha256_for_every_file() {
-        for spec in PARAKEET_FILES.iter().chain(CANARY_FILES.iter()) {
-            assert!(
-                spec.sha256.is_some(),
-                "missing sha256 for model file {}",
-                spec.name
-            );
+        let all: &[(&str, &[ModelFileSpec])] = &[
+            ("parakeet", PARAKEET_FILES),
+            ("canary", CANARY_FILES),
+            ("whisper_small", WHISPER_SMALL_FILES),
+            ("whisper_medium", WHISPER_MEDIUM_FILES),
+            ("whisper_large", WHISPER_LARGE_FILES),
+            ("whisper_turbo", WHISPER_TURBO_FILES),
+            ("qwen3_asr", QWEN3_ASR_FILES),
+        ];
+        for (model, specs) in all {
+            for spec in *specs {
+                assert!(
+                    spec.sha256.is_some(),
+                    "missing sha256 for {model}/{}", spec.name
+                );
+            }
         }
     }
 
