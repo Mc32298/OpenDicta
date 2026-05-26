@@ -1517,7 +1517,7 @@ async fn model_file_matches_spec(path: &Path, spec: &ModelFileSpec) -> bool {
             Ok(actual_sha256) => actual_sha256.eq_ignore_ascii_case(expected_sha256),
             Err(_) => false,
         },
-        None => true,
+        None => meta.len() == spec.expected_bytes,
     }
 }
 
@@ -4388,6 +4388,26 @@ mod ai_settings_tests {
         let matches = tauri::async_runtime::block_on(model_file_matches_spec(&path, &spec));
 
         assert!(!matches);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn model_file_matches_spec_rejects_oversized_file_with_no_sha256() {
+        let unique = crate::now_millis();
+        let dir = std::env::temp_dir().join(format!("OpenDicta-model-oversize-{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tokens.txt");
+        // Write 10 bytes — more than the spec's expected 5 bytes
+        std::fs::write(&path, b"0123456789").unwrap();
+        let spec = ModelFileSpec {
+            name: "tokens.txt",
+            expected_bytes: 5,
+            sha256: None,
+        };
+
+        let matches = tauri::async_runtime::block_on(model_file_matches_spec(&path, &spec));
+
+        assert!(!matches, "oversized file with no sha256 should be rejected");
         let _ = std::fs::remove_dir_all(dir);
     }
 
