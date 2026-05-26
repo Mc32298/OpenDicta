@@ -480,13 +480,13 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
         <div className="col" style={{ flex: 1 }}>
           <div className="card card-lg">
             <div className="section-title">Shortcuts</div>
-            <Shortcut label="Record toggle" value={captureValue(editingShortcut === "record", capturePreview, shortcuts.record)} editing={editingShortcut === "record"} onEdit={() => beginCapture("record", setEditingShortcut, setCapturePreview)} />
+            <Shortcut label="Record toggle" value={captureValue(editingShortcut === "record", capturePreview, shortcuts.record)} editing={editingShortcut === "record"} onEdit={() => { setCapturePreview(null); setEditingShortcut("record"); }} />
             <Divider />
-            <Shortcut label="Push-to-talk" value={captureValue(editingShortcut === "pushToTalk", capturePreview, shortcuts.pushToTalk)} editing={editingShortcut === "pushToTalk"} onEdit={() => beginCapture("pushToTalk", setEditingShortcut, setCapturePreview)} />
+            <Shortcut label="Push-to-talk" value={captureValue(editingShortcut === "pushToTalk", capturePreview, shortcuts.pushToTalk)} editing={editingShortcut === "pushToTalk"} onEdit={() => { setCapturePreview(null); setEditingShortcut("pushToTalk"); }} />
             <Divider />
-            <Shortcut label="Stop and discard" value={captureValue(editingShortcut === "stop", capturePreview, shortcuts.stop)} editing={editingShortcut === "stop"} onEdit={() => beginCapture("stop", setEditingShortcut, setCapturePreview)} />
+            <Shortcut label="Stop and discard" value={captureValue(editingShortcut === "stop", capturePreview, shortcuts.stop)} editing={editingShortcut === "stop"} onEdit={() => { setCapturePreview(null); setEditingShortcut("stop"); }} />
             <Divider />
-            <Shortcut label="Quick switcher" value={captureValue(editingShortcut === "quick", capturePreview, shortcuts.quick)} editing={editingShortcut === "quick"} onEdit={() => beginCapture("quick", setEditingShortcut, setCapturePreview)} />
+            <Shortcut label="Quick switcher" value={captureValue(editingShortcut === "quick", capturePreview, shortcuts.quick)} editing={editingShortcut === "quick"} onEdit={() => { setCapturePreview(null); setEditingShortcut("quick"); }} />
           </div>
 
           <div className="card" style={{ background: "var(--ink-1)", color: "oklch(95% 0.005 85)", borderColor: "transparent" }}>
@@ -562,15 +562,6 @@ function Shortcut({ label, value, editing, onEdit }: { label: string; value: str
       </div>
     </div>
   );
-}
-
-function beginCapture(
-  key: "record" | "pushToTalk" | "stop" | "quick",
-  setEditingShortcut: (v: "record" | "pushToTalk" | "stop" | "quick" | null) => void,
-  setCapturePreview: (v: string | null) => void,
-) {
-  setCapturePreview(null);
-  setEditingShortcut(key);
 }
 
 function captureValue(editing: boolean, preview: string | null, fallback: string) {
