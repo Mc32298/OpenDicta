@@ -194,8 +194,10 @@ export function getUpdateActionLabel(state: UpdateState): string {
       return "Checking...";
     case "available":
       return "Download update";
-    case "downloading":
-      return downloadPercent(state) ? `Downloading ${downloadPercent(state)}` : "Downloading...";
+    case "downloading": {
+      const pct = downloadPercent(state);
+      return pct ? `Downloading ${pct}` : "Downloading...";
+    }
     case "ready":
       return "Restart to update";
     default:
