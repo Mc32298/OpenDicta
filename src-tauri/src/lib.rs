@@ -1521,6 +1521,13 @@ async fn model_file_matches_spec(path: &Path, spec: &ModelFileSpec) -> bool {
     }
 }
 
+fn max_download_bytes(expected_size: u64, content_length: Option<u64>) -> u64 {
+    content_length
+        .map(|len| len.max(expected_size))
+        .unwrap_or(expected_size)
+        .saturating_add(1024)
+}
+
 #[derive(serde::Serialize)]
 struct ModelFileInfo {
     name: &'static str,
@@ -1670,7 +1677,9 @@ async fn download_model(
         }
         let response = response.ok_or_else(|| last_err)?;
 
-        let content_length = response.content_length().unwrap_or(expected_size);
+        let content_length = response.content_length();
+        let announced_size = content_length.unwrap_or(expected_size);
+        let max_bytes = max_download_bytes(expected_size, content_length);
 
         // Ensure any subdirectory (e.g. tokenizer/) exists before writing.
         if let Some(parent) = dest.parent() {
@@ -1695,15 +1704,15 @@ async fn download_model(
             downloaded += chunk.len() as u64;
 
             // 1024-byte slack for HTTP chunk-boundary overrun; exact-size verified post-download by SHA256.
-            if downloaded > expected_size + 1024 {
+            if downloaded > max_bytes {
                 let _ = tokio::fs::remove_file(&tmp).await;
                 return Err(format!(
-                    "Download for {} exceeded expected size ({} bytes)",
-                    name, expected_size
+                    "Download for {} exceeded allowed size (expected {}, announced {})",
+                    name, expected_size, announced_size
                 ));
             }
 
-            let overall = ((idx as f64 + downloaded as f64 / content_length as f64)
+            let overall = ((idx as f64 + downloaded as f64 / announced_size as f64)
                 / total_files as f64
                 * 100.0) as u8;
 
@@ -1715,7 +1724,7 @@ async fn download_model(
                     file_index: idx,
                     file_total: total_files,
                     file_bytes: downloaded,
-                    file_size: content_length,
+                    file_size: announced_size,
                     overall_percent: overall,
                 },
             );
@@ -4243,8 +4252,9 @@ mod ai_settings_tests {
     use crate::ai::AiProvider;
 
     #[test]
-    fn default_ai_preset_is_raw() {
-        assert_eq!(default_ai_model(), "raw");
+    fn default_ai_defaults_match_expected_mode_and_model() {
+        assert_eq!(default_ai_default_mode(), "raw");
+        assert_eq!(default_ai_model(), "gpt-4o-mini");
     }
 
     #[test]
@@ -4439,6 +4449,18 @@ mod ai_settings_tests {
 
         assert!(!matches, "oversized file with no sha256 should be rejected");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn max_download_bytes_allows_announced_size_above_expected() {
+        let limit = max_download_bytes(652_000_000, Some(652_734_976));
+        assert_eq!(limit, 652_736_000);
+    }
+
+    #[test]
+    fn max_download_bytes_falls_back_to_expected_size_when_unknown() {
+        let limit = max_download_bytes(5, None);
+        assert_eq!(limit, 1_029);
     }
 
     #[test]
