@@ -27,7 +27,7 @@ pub fn load() -> Result<OfflineRecognizer, Box<dyn std::error::Error>> {
 
     let provider = std::env::var("OpenDicta_PROVIDER")
         .unwrap_or_else(|_| "cpu".to_string());
-    let num_threads = num_cpus().min(4) as i32;
+    let num_threads = num_cpus().min(8) as i32;
 
     eprintln!(
         "[worker] Loading model '{}' from {} (provider={} threads={})",
