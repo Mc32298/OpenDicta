@@ -138,21 +138,48 @@ fn block_outbound_network() {
     }
 }
 
+/// Whisper's encoder accepts exactly 30 seconds of audio (480 000 samples at
+/// 16 kHz). Feeding more causes silent truncation. We split long recordings
+/// into 29-second chunks so every chunk fits within the encoder window, then
+/// join the per-chunk transcripts with a single space.
+const WHISPER_CHUNK_SAMPLES: usize = 29 * 16_000; // 29 s × 16 000 Hz
+
 fn transcribe(
     recognizer: &sherpa_onnx::OfflineRecognizer,
     path: &PathBuf,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    // Read WAV and resample to 16 kHz mono (Parakeet requirement)
     let (samples, sample_rate) = audio::read_wav_mono_16k(path)?;
 
-    // Create a per-request stream, feed audio, decode
-    let stream = recognizer.create_stream();
-    stream.accept_waveform(sample_rate as i32, &samples);
-    recognizer.decode(&stream);
+    let chunk_size = if samples.len() <= WHISPER_CHUNK_SAMPLES {
+        // Short clip — single pass, no chunking needed.
+        samples.len()
+    } else {
+        WHISPER_CHUNK_SAMPLES
+    };
 
-    let text = stream
-        .get_result()
-        .ok_or("recognizer returned no result")?
-        .text;
-    Ok(text.trim().to_string())
+    let mut parts: Vec<String> = Vec::new();
+    let mut start = 0;
+
+    while start < samples.len() {
+        let end = (start + chunk_size).min(samples.len());
+        let chunk = &samples[start..end];
+
+        let stream = recognizer.create_stream();
+        stream.accept_waveform(sample_rate as i32, chunk);
+        recognizer.decode(&stream);
+
+        if let Some(result) = stream.get_result() {
+            let text = result.text.trim().to_string();
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+
+        start += chunk_size;
+    }
+
+    if parts.is_empty() {
+        return Err("recognizer returned no result".into());
+    }
+    Ok(parts.join(" "))
 }

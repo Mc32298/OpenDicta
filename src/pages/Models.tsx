@@ -31,6 +31,16 @@ const MODELS = [
     langLabel: "English",
   },
   {
+    id: "whisper_tiny",
+    name: catalogName(MODEL_CATALOG, "whisper_tiny"),
+    tag: "Ultra-fast, minimal",
+    desc: "The smallest Whisper model. Fastest on any hardware, lowest RAM. Best for quick dictation in clear conditions. Less robust with heavy accents or background noise.",
+    perf: 99, qual: 55,
+    size: "103 MB",
+    langMode: "whisper" as LangMode,
+    langLabel: "Multi",
+  },
+  {
     id: "whisper_small",
     name: catalogName(MODEL_CATALOG, "whisper_small"),
     tag: "Compact & efficient",

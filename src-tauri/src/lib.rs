@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 use tauri::{
@@ -179,6 +179,14 @@ struct AppState {
     typing_baseline_wpm: Arc<Mutex<u32>>,
     /// Metadata captured when audio is finalized and consumed when worker stdout returns.
     pending_transcript_meta: Arc<Mutex<Option<PendingTranscriptMeta>>>,
+    /// Partial transcripts from chunks dispatched to the worker during recording.
+    streaming_parts: Arc<Mutex<Vec<String>>>,
+    /// How many chunk WAVs have been sent to the worker but not yet returned.
+    streaming_pending: Arc<AtomicUsize>,
+    /// Temp WAV files created for streaming chunks (cleaned up after all chunks finish).
+    streaming_wav_paths: Arc<Mutex<Vec<PathBuf>>>,
+    /// Total 16 kHz samples dispatched as streaming chunks (used for duration metadata).
+    streaming_samples_dispatched: Arc<AtomicUsize>,
     /// Serializes read-modify-write transcript history appends.
     history_write_lock: Arc<Mutex<()>>,
     /// OpenAI API key loaded from keyring/encrypted storage at startup
@@ -262,6 +270,10 @@ impl AppState {
             ai_ollama_url: Arc::new(Mutex::new("http://localhost:11434".to_string())),
             typing_baseline_wpm: Arc::new(Mutex::new(history::DEFAULT_TYPING_BASELINE_WPM)),
             pending_transcript_meta: Arc::new(Mutex::new(None)),
+            streaming_parts: Arc::new(Mutex::new(Vec::new())),
+            streaming_pending: Arc::new(AtomicUsize::new(0)),
+            streaming_wav_paths: Arc::new(Mutex::new(Vec::new())),
+            streaming_samples_dispatched: Arc::new(AtomicUsize::new(0)),
             history_write_lock: Arc::new(Mutex::new(())),
             openai_api_key: Arc::new(Mutex::new(None)),
             gemini_api_key: Arc::new(Mutex::new(None)),
@@ -946,6 +958,7 @@ async fn set_active_model_id(
     let valid = [
         "parakeet",
         "canary_qwen_2_5b",
+        "whisper_tiny",
         "whisper_small",
         "whisper_medium",
         "whisper_large",
@@ -1338,6 +1351,27 @@ const CANARY_FILES: &[ModelFileSpec] = &[
 const CANARY_DOWNLOAD_BASES: &[&str] =
     &["https://huggingface.co/csukuangfj/sherpa-onnx-nemo-canary-qwen2.5-0.5b-int8/resolve/main"];
 
+/// Whisper Tiny INT8 — ultra-fast, minimal footprint (~103 MB total)
+const WHISPER_TINY_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec {
+        name: "tiny-encoder.int8.onnx",
+        expected_bytes: 12_900_000,
+        sha256: Some("d24fb083ae3b1041fc24e97971d60e280c9342201fbb67b0ab428a8b4a51a434"),
+    },
+    ModelFileSpec {
+        name: "tiny-decoder.int8.onnx",
+        expected_bytes: 89_900_000,
+        sha256: Some("d2fece8dd42771f1df975c6c0445770d0c292bf7547c2cae04a6c0cc57540925"),
+    },
+    ModelFileSpec {
+        name: "tiny-tokens.txt",
+        expected_bytes: 816_730,
+        sha256: Some("b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"),
+    },
+];
+const WHISPER_TINY_DOWNLOAD_BASES: &[&str] =
+    &["https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny/resolve/main"];
+
 /// Whisper Small INT8 — compact, fast English model (~374 MB total)
 const WHISPER_SMALL_FILES: &[ModelFileSpec] = &[
     ModelFileSpec {
@@ -1461,6 +1495,7 @@ const QWEN3_ASR_DOWNLOAD_BASES: &[&str] =
 fn model_specs_for(model_id: &str) -> &'static [ModelFileSpec] {
     match model_id {
         "canary_qwen_2_5b" => CANARY_FILES,
+        "whisper_tiny" => WHISPER_TINY_FILES,
         "whisper_small" => WHISPER_SMALL_FILES,
         "whisper_medium" => WHISPER_MEDIUM_FILES,
         "whisper_large" => WHISPER_LARGE_FILES,
@@ -1473,6 +1508,7 @@ fn model_specs_for(model_id: &str) -> &'static [ModelFileSpec] {
 fn download_bases_for(model_id: &str) -> &'static [&'static str] {
     match model_id {
         "canary_qwen_2_5b" => CANARY_DOWNLOAD_BASES,
+        "whisper_tiny" => WHISPER_TINY_DOWNLOAD_BASES,
         "whisper_small" => WHISPER_SMALL_DOWNLOAD_BASES,
         "whisper_medium" => WHISPER_MEDIUM_DOWNLOAD_BASES,
         "whisper_large" => WHISPER_LARGE_DOWNLOAD_BASES,
@@ -2835,132 +2871,107 @@ fn save_wav(samples: &[f32], path: &std::path::Path) -> Result<(), hound::Error>
 // ─── M2: Finalize Recording ───────────────────────────────────────────────────
 
 async fn finalize_recording(app: AppHandle, state: SharedState) {
-    // 1. Signal the audio thread to stop
+    // 1. Signal the audio + chunk-flush threads to stop.
     state.recording.store(false, Ordering::SeqCst);
 
-    // 2. Give the audio thread a moment to flush its last batch of samples
+    // 2. Give the audio callback a moment to flush its last batch of samples.
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
-    // 3. Grab the captured samples and leave the buffer empty for next time
-    let samples = {
+    // 3. Drain whatever remains in the buffer (the tail after the last streamed chunk,
+    //    or the entire recording for clips shorter than 29 seconds).
+    let tail_samples = {
         let mut buf = state.audio_buffer.lock().unwrap();
         std::mem::take(&mut *buf)
     };
 
-    if samples.is_empty() {
+    let pending = state.streaming_pending.load(Ordering::SeqCst);
+
+    // 4. Nothing at all — no speech.
+    if tail_samples.is_empty() && pending == 0 {
         *state.pending_transcript_meta.lock().unwrap() = None;
         app.emit(
             "transcription-error",
             serde_json::json!({"message": "No audio recorded — try holding the key longer."}),
-        )
-        .ok();
+        ).ok();
         state.sidecar_busy.store(false, Ordering::SeqCst);
         hide_voicebar(&app);
         return;
     }
 
-    // 4. Resample from device rate to 16kHz (no-op if already 16kHz)
+    // 5. Resample the tail to 16 kHz.
     let device_rate = *state.device_sample_rate.lock().unwrap();
-    let mut samples_16khz = resample_to_16khz(&samples, device_rate);
-
-    // 4b. Fast no-speech guard: skip worker call for extremely short or silent input.
-    // This avoids getting stuck in "Transcribing..." when the user only tapped the key.
-    // RMS is measured here, before normalization, so a silent recording is still rejected.
-    let duration_sec = samples_16khz.len() as f32 / 16_000.0;
-    let rms = if samples_16khz.is_empty() {
-        0.0
+    let mut tail_16k = if tail_samples.is_empty() {
+        Vec::new()
     } else {
-        let sum_sq: f32 = samples_16khz.iter().map(|s| s * s).sum();
-        (sum_sq / samples_16khz.len() as f32).sqrt()
+        resample_to_16khz(&tail_samples, device_rate)
     };
-    let too_short = duration_sec < 0.20;
-    let too_quiet = rms < 0.002;
-    if too_short || too_quiet {
-        *state.pending_transcript_meta.lock().unwrap() = None;
-        let reason = if too_short {
-            "No speech detected (too short)."
+
+    // 6. No-speech guard on the tail — but only reject if no streaming chunks are
+    //    already in flight, to avoid discarding a whole long recording.
+    if pending == 0 {
+        let duration_sec = tail_16k.len() as f32 / 16_000.0;
+        let rms = if tail_16k.is_empty() {
+            0.0
         } else {
-            "No speech detected."
+            let sum_sq: f32 = tail_16k.iter().map(|s| s * s).sum();
+            (sum_sq / tail_16k.len() as f32).sqrt()
         };
-        app.emit(
-            "transcription-error",
-            serde_json::json!({"message": reason}),
-        )
-        .ok();
-        state.sidecar_busy.store(false, Ordering::SeqCst);
-        hide_voicebar(&app);
-        return;
+        if duration_sec < 0.20 || rms < 0.002 {
+            *state.pending_transcript_meta.lock().unwrap() = None;
+            let reason = if duration_sec < 0.20 {
+                "No speech detected (too short)."
+            } else {
+                "No speech detected."
+            };
+            app.emit("transcription-error", serde_json::json!({"message": reason})).ok();
+            state.sidecar_busy.store(false, Ordering::SeqCst);
+            hide_voicebar(&app);
+            return;
+        }
     }
 
+    // 7. Set duration metadata (streaming chunks already dispatched + tail).
+    let streamed = state.streaming_samples_dispatched.load(Ordering::SeqCst);
+    let total_duration = (streamed + tail_16k.len()) as f64 / 16_000.0;
     *state.pending_transcript_meta.lock().unwrap() = Some(PendingTranscriptMeta {
-        duration_seconds: duration_sec as f64,
+        duration_seconds: total_duration,
     });
 
-    // Tell the frontend to show "Transcribing…" only after speech presence checks pass.
+    // Tell the frontend to show "Transcribing…"
     app.emit("recording-stopped", ()).ok();
 
-    // Boost quiet/whispered speech toward a healthy level before saving the WAV.
-    normalize_audio(&mut samples_16khz);
+    // 8. Dispatch the tail chunk (if any).  For recordings < 29 s this is the only
+    //    chunk; for longer recordings it's just the last few seconds.
+    if !tail_16k.is_empty() {
+        normalize_audio(&mut tail_16k);
 
-    // 5. Save to a temp WAV file
-    let wav_path = std::env::temp_dir().join(format!("OpenDicta_{}.wav", now_millis()));
-    if let Err(e) = save_wav(&samples_16khz, &wav_path) {
-        *state.pending_transcript_meta.lock().unwrap() = None;
-        app.emit(
-            "transcription-error",
-            serde_json::json!({"message": format!("Failed to save audio: {}", e)}),
-        )
-        .ok();
-        state.sidecar_busy.store(false, Ordering::SeqCst);
-        hide_voicebar(&app);
-        return;
-    }
-
-    // 6. Send the WAV path to the worker via stdin
-    //    The worker transcribes it and replies on stdout (handled in spawn_sidecar)
-    {
-        let stdin_missing = state.sidecar_stdin.lock().unwrap().is_none();
-        if stdin_missing {
-            // Sidecar may be offloaded; spawn on demand.
-            spawn_sidecar(app.clone(), state.clone());
-            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        }
-    }
-
-    let mut stdin_guard = state.sidecar_stdin.lock().unwrap();
-    match stdin_guard.as_mut() {
-        Some(stdin) => {
-            if let Err(e) = writeln!(stdin, "{}", wav_path.display()) {
-                *state.pending_transcript_meta.lock().unwrap() = None;
-                app.emit(
-                    "transcription-error",
-                    serde_json::json!({"message": format!("STT engine not responding: {}", e)}),
-                )
-                .ok();
-                hide_voicebar(&app);
-                state.sidecar_busy.store(false, Ordering::SeqCst);
-                return;
+        // Ensure the worker process is running (may have been offloaded).
+        {
+            let stdin_missing = state.sidecar_stdin.lock().unwrap().is_none();
+            if stdin_missing {
+                spawn_sidecar(app.clone(), state.clone());
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             }
-            state.sidecar_busy.store(true, Ordering::SeqCst);
-            state
-                .sidecar_last_used_ms
-                .store(now_millis(), Ordering::SeqCst);
-            state.sidecar_standby.store(false, Ordering::SeqCst);
-            *state.last_wav_path.lock().unwrap() = Some(wav_path.clone());
-            // Transcript will arrive as a "transcript-ready" event from the
-            // background stdout-reader thread (see spawn_sidecar below)
         }
-        None => {
+
+        let before = state.streaming_pending.load(Ordering::SeqCst);
+        send_chunk_to_worker(&state, tail_16k);
+        let after = state.streaming_pending.load(Ordering::SeqCst);
+
+        // If the send failed (sidecar not responding), clean up and report.
+        if after == before {
             *state.pending_transcript_meta.lock().unwrap() = None;
             app.emit(
                 "transcription-error",
                 serde_json::json!({"message": "STT engine is not running. Is opendicta-worker.exe built? Run: cargo build -p opendicta-worker"}),
-            )
-            .ok();
+            ).ok();
             hide_voicebar(&app);
             state.sidecar_busy.store(false, Ordering::SeqCst);
         }
+        // On success: stdout reader fires when all pending chunks return.
     }
+    // If tail is empty but pending > 0: streaming chunks are still in flight.
+    // The stdout reader handles finalization when the last one arrives.
 }
 
 // ─── Rust Worker Sidecar ──────────────────────────────────────────────────────
@@ -3041,13 +3052,42 @@ fn worker_binary_path() -> std::path::PathBuf {
 
 fn finish_transcript_request(state: &SharedState) {
     state.sidecar_busy.store(false, Ordering::SeqCst);
-    state
-        .sidecar_last_used_ms
-        .store(now_millis(), Ordering::SeqCst);
+    state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
     *state.pending_transcript_meta.lock().unwrap() = None;
     if let Some(path) = state.last_wav_path.lock().unwrap().take() {
         let _ = std::fs::remove_file(&path);
     }
+    for path in state.streaming_wav_paths.lock().unwrap().drain(..) {
+        let _ = std::fs::remove_file(&path);
+    }
+    state.streaming_parts.lock().unwrap().clear();
+    state.streaming_pending.store(0, Ordering::SeqCst);
+    state.streaming_samples_dispatched.store(0, Ordering::SeqCst);
+}
+
+/// Save `samples_16k` to a temp WAV and send its path to the worker via stdin.
+/// Increments `streaming_pending` and `streaming_samples_dispatched` on success.
+fn send_chunk_to_worker(state: &SharedState, samples_16k: Vec<f32>) {
+    let wav_path = std::env::temp_dir()
+        .join(format!("OpenDicta_chunk_{}.wav", now_millis()));
+    if save_wav(&samples_16k, &wav_path).is_err() {
+        return;
+    }
+    let n = samples_16k.len();
+    let mut stdin_guard = state.sidecar_stdin.lock().unwrap();
+    if let Some(stdin) = stdin_guard.as_mut() {
+        if writeln!(stdin, "{}", wav_path.display()).is_ok() {
+            drop(stdin_guard);
+            state.streaming_wav_paths.lock().unwrap().push(wav_path);
+            state.streaming_pending.fetch_add(1, Ordering::SeqCst);
+            state.streaming_samples_dispatched.fetch_add(n, Ordering::SeqCst);
+            state.sidecar_busy.store(true, Ordering::SeqCst);
+            state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
+            state.sidecar_standby.store(false, Ordering::SeqCst);
+            return;
+        }
+    }
+    let _ = std::fs::remove_file(&wav_path);
 }
 
 #[tauri::command]
@@ -3175,17 +3215,8 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                     app_stdout
                         .emit("transcription-error", serde_json::json!({"message": msg}))
                         .ok();
-
-                    // Hide the bar on error
                     hide_voicebar(&app_stdout);
-                    *state_for_stdout.pending_transcript_meta.lock().unwrap() = None;
-                    state_for_stdout.sidecar_busy.store(false, Ordering::SeqCst);
-                    state_for_stdout
-                        .sidecar_last_used_ms
-                        .store(now_millis(), Ordering::SeqCst);
-                    if let Some(path) = state_for_stdout.last_wav_path.lock().unwrap().take() {
-                        let _ = std::fs::remove_file(&path);
-                    }
+                    finish_transcript_request(&state_for_stdout);
                 }
                 Ok(text) if text.starts_with("STATUS:") => {
                     let msg = text.strip_prefix("STATUS:").unwrap_or("").to_string();
@@ -3198,11 +3229,36 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                         .store(now_millis(), Ordering::SeqCst);
                 }
                 Ok(text) if text.starts_with("TRANSCRIPT:") => {
-                    let transcript = text
+                    let chunk_text = text
                         .strip_prefix("TRANSCRIPT:")
                         .unwrap_or("")
                         .trim()
                         .to_string();
+
+                    // Accumulate non-empty chunk texts.
+                    if !chunk_text.is_empty() {
+                        state_for_stdout.streaming_parts.lock().unwrap().push(chunk_text);
+                    }
+
+                    // Decrement the pending counter.  fetch_sub returns the OLD value.
+                    let was = state_for_stdout.streaming_pending.fetch_sub(1, Ordering::SeqCst);
+                    if was == 0 {
+                        // Shouldn't happen, but guard against AtomicUsize underflow.
+                        state_for_stdout.streaming_pending.store(0, Ordering::SeqCst);
+                        continue;
+                    }
+                    let remaining = was - 1;
+                    if remaining > 0 {
+                        // More chunks are still being processed — wait for them.
+                        continue;
+                    }
+
+                    // All chunks done. Build the final transcript from all parts.
+                    let transcript = {
+                        let parts = state_for_stdout.streaming_parts.lock().unwrap();
+                        parts.join(" ").trim().to_string()
+                    };
+
                     if transcript.is_empty() {
                         let _ = app_stdout.emit(
                             "transcription-error",
@@ -3846,6 +3902,11 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
     state.recording.store(true, Ordering::SeqCst);
     state.audio_buffer.lock().unwrap().clear();
     *state.pending_transcript_meta.lock().unwrap() = None;
+    // Reset streaming state for this new recording
+    state.streaming_parts.lock().unwrap().clear();
+    state.streaming_pending.store(0, Ordering::SeqCst);
+    state.streaming_wav_paths.lock().unwrap().clear();
+    state.streaming_samples_dispatched.store(0, Ordering::SeqCst);
 
     start_audio_capture(
         app.clone(),
@@ -3856,6 +3917,7 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
         state.recording.clone(),
     );
 
+    // Warmup / spawn the worker so the model is hot before recording ends.
     let app_pw = app.clone();
     let state_pw = state.clone();
     std::thread::spawn(move || {
@@ -3868,6 +3930,42 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
             spawn_sidecar(app_pw, state_pw);
         }
     });
+
+    // Chunk-flush thread: every 500 ms, check whether the audio buffer has
+    // accumulated a full 29-second window. If so, drain it and dispatch it
+    // to the worker immediately so transcription runs in parallel with recording.
+    // This only fires for recordings > 29 s; shorter recordings are unaffected.
+    {
+        let state_cf = state.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if !state_cf.recording.load(Ordering::SeqCst) {
+                    break;
+                }
+                let device_rate = *state_cf.device_sample_rate.lock().unwrap();
+                let threshold = (29 * device_rate) as usize;
+                let chunk = {
+                    let mut buf = state_cf.audio_buffer.lock().unwrap();
+                    if buf.len() < threshold {
+                        continue;
+                    }
+                    buf.drain(..threshold).collect::<Vec<f32>>()
+                };
+                let mut samples_16k = resample_to_16khz(&chunk, device_rate);
+                // Skip truly silent chunks (rare ambient noise burst)
+                let rms = {
+                    let sum_sq: f32 = samples_16k.iter().map(|s| s * s).sum();
+                    (sum_sq / samples_16k.len() as f32).sqrt()
+                };
+                if rms < 0.002 {
+                    continue;
+                }
+                normalize_audio(&mut samples_16k);
+                send_chunk_to_worker(&state_cf, samples_16k);
+            }
+        });
+    }
 }
 
 fn handle_shortcut_released(app: AppHandle, state: SharedState, shortcut: String) {
@@ -4334,6 +4432,7 @@ mod ai_settings_tests {
         let all: &[(&str, &[ModelFileSpec])] = &[
             ("parakeet", PARAKEET_FILES),
             ("canary", CANARY_FILES),
+            ("whisper_tiny", WHISPER_TINY_FILES),
             ("whisper_small", WHISPER_SMALL_FILES),
             ("whisper_medium", WHISPER_MEDIUM_FILES),
             ("whisper_large", WHISPER_LARGE_FILES),

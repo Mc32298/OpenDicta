@@ -36,7 +36,7 @@ pub fn load() -> Result<OfflineRecognizer, Box<dyn std::error::Error>> {
 
     match model_id.as_str() {
         "canary_qwen_2_5b" => load_canary(&dir, &provider, num_threads),
-        id @ ("whisper_small" | "whisper_medium" | "whisper_large" | "whisper_large_v3_turbo") => {
+        id @ ("whisper_tiny" | "whisper_small" | "whisper_medium" | "whisper_large" | "whisper_large_v3_turbo") => {
             load_whisper(id, &dir, &provider, num_threads)
         }
         "qwen3_asr" => load_qwen3_asr(&dir, &provider, num_threads),
@@ -105,6 +105,11 @@ fn load_whisper(
     num_threads: i32,
 ) -> Result<OfflineRecognizer, Box<dyn std::error::Error>> {
     let (encoder_name, decoder_name, tokens_name) = match model_id {
+        "whisper_tiny" => (
+            "tiny-encoder.int8.onnx",
+            "tiny-decoder.int8.onnx",
+            "tiny-tokens.txt",
+        ),
         "whisper_small" => (
             "small-encoder.int8.onnx",
             "small-decoder.int8.onnx",

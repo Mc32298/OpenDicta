@@ -14,6 +14,7 @@ import { listen } from "@tauri-apps/api/event";
 export const MODEL_IDS = [
   "parakeet",
   "qwen3_asr",
+  "whisper_tiny",
   "whisper_small",
   "whisper_large",
   "whisper_large_v3_turbo",

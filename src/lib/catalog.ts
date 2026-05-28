@@ -7,6 +7,7 @@ export interface CatalogItem {
 export const MODEL_CATALOG: CatalogItem[] = [
   { id: "parakeet",                name: "Parakeet V3" },
   { id: "qwen3_asr",               name: "Whisper Pro" },
+  { id: "whisper_tiny",            name: "Whisper Nano" },
   { id: "whisper_small",           name: "Whisper Light" },
   { id: "whisper_large",           name: "Whisper Pro+" },
   { id: "whisper_large_v3_turbo",  name: "Whisper MAX" },
