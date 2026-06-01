@@ -16,8 +16,6 @@ interface Row {
 // Backend AI mode -> Style display id (mirrors Style.tsx).
 function mapMode(mode: string): string {
   if (mode === "clean") return "grammar";
-  if (mode === "translate") return "summary";
-  if (mode === "clean_translate") return "grammar";
   return mode;
 }
 

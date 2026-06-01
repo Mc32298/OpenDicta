@@ -25,10 +25,7 @@ const STYLES = STYLE_CATALOG.map((c) => {
 });
 
 function mapModeToStyle(mode: string): string {
-  return mode === "clean" ? "grammar" :
-    mode === "translate" ? "summary" :
-    mode === "clean_translate" ? "grammar" :
-    mode;
+  return mode === "clean" ? "grammar" : mode;
 }
 
 export default function Style({ aiEnabled }: { aiEnabled: boolean }) {

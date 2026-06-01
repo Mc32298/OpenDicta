@@ -166,7 +166,7 @@ struct AppState {
     onboarding_completed: Arc<AtomicBool>,
     completion_sound: Arc<AtomicBool>,
     /// Default processing mode for every recording (unless a profile hotkey overrides).
-    /// Values: "raw" | "clean" | "translate" | "clean_translate"
+    /// Values: "raw" | "grammar" | "email" | "prompt" | "pro" | "bullets" | "chat" | "summary" | "clean"
     ai_default_mode: Arc<Mutex<String>>,
     ai_enabled: Arc<AtomicBool>,
     /// AI backend: "openai" | "anthropic" | "ollama"
@@ -187,6 +187,10 @@ struct AppState {
     streaming_wav_paths: Arc<Mutex<Vec<PathBuf>>>,
     /// Total 16 kHz samples dispatched as streaming chunks (used for duration metadata).
     streaming_samples_dispatched: Arc<AtomicUsize>,
+    /// Monotonic diagnostic counter for chunks created during the current recording.
+    streaming_chunks_started: Arc<AtomicUsize>,
+    /// Monotonic diagnostic counter for worker chunk responses during the current recording.
+    streaming_chunks_completed: Arc<AtomicUsize>,
     /// Serializes read-modify-write transcript history appends.
     history_write_lock: Arc<Mutex<()>>,
     /// OpenAI API key loaded from keyring/encrypted storage at startup
@@ -195,8 +199,6 @@ struct AppState {
     gemini_api_key: Arc<Mutex<Option<String>>>,
     /// Anthropic API key loaded from keyring/encrypted storage at startup
     anthropic_api_key: Arc<Mutex<Option<String>>>,
-    /// Target language for translate/clean_translate presets
-    ai_target_language: Arc<Mutex<String>>,
     /// STT transcription language passed to the worker ("en", "es", "de", … or "auto")
     stt_language: Arc<Mutex<String>>,
     /// Shared HTTP client for AI provider requests (reqwest is cheap to clone)
@@ -274,11 +276,12 @@ impl AppState {
             streaming_pending: Arc::new(AtomicUsize::new(0)),
             streaming_wav_paths: Arc::new(Mutex::new(Vec::new())),
             streaming_samples_dispatched: Arc::new(AtomicUsize::new(0)),
+            streaming_chunks_started: Arc::new(AtomicUsize::new(0)),
+            streaming_chunks_completed: Arc::new(AtomicUsize::new(0)),
             history_write_lock: Arc::new(Mutex::new(())),
             openai_api_key: Arc::new(Mutex::new(None)),
             gemini_api_key: Arc::new(Mutex::new(None)),
             anthropic_api_key: Arc::new(Mutex::new(None)),
-            ai_target_language: Arc::new(Mutex::new(String::new())),
             stt_language: Arc::new(Mutex::new("en".to_string())),
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
@@ -337,46 +340,54 @@ fn idle_timeout_ms(profile: &str) -> u64 {
 
 type SharedState = Arc<AppState>;
 
+const VALID_AI_DEFAULT_MODES: &[&str] = &[
+    "raw",
+    "grammar",
+    "email",
+    "prompt",
+    "pro",
+    "bullets",
+    "chat",
+    "summary",
+    "clean",
+];
+
+fn is_valid_ai_default_mode(mode: &str) -> bool {
+    VALID_AI_DEFAULT_MODES.contains(&mode)
+}
+
 fn resolve_ai_prompt_and_mode(default_mode: &str) -> (Option<&'static str>, Option<String>) {
     match default_mode {
         "grammar" => (
-            Some("Fix grammar and punctuation. Preserve meaning and tone. Return only the corrected text, no explanation. Output plain text only (no Markdown symbols like **, #, -, *, or backticks)."),
+            Some("You are refining a dictated transcript. Correct grammar, punctuation, casing, and sentence boundaries while preserving the speaker's meaning, voice, intent, and level of formality. Remove obvious filler words, false starts, and repeated fragments only when they do not add meaning. Do not add new facts, names, dates, commitments, or explanations. Return only the polished text as plain text, with no preamble, labels, Markdown, bullets, or decorative formatting."),
             Some(default_mode.to_string()),
         ),
         "email" => (
-            Some("Transform the transcript into a well-written email with a clear subject line, greeting, polished body, and sign-off. Return only the email text. Output plain text only (no Markdown symbols like **, #, -, *, or backticks)."),
+            Some("Turn the dictated transcript into a clear, ready-to-send email. Infer a concise subject line from the transcript, then write a natural greeting, a polished body, and an appropriate sign-off. Preserve all factual details and intent, but organize the message so the ask, context, deadlines, and next steps are easy to understand. Do not invent recipients, facts, dates, promises, or attachments. If the speaker did not provide a name, use a neutral greeting. Return only the email text as plain text, with no explanation and no Markdown decoration."),
             Some(default_mode.to_string()),
         ),
         "prompt" => (
-            Some("Transform the transcript into a high-quality prompt for an AI coding assistant. Structure it with context, objective, constraints, and desired output. Return only the final prompt. Output plain text only (no Markdown symbols like **, #, -, *, or backticks)."),
+            Some("Transform the dictated transcript into a strong prompt for an AI coding assistant. Preserve the user's actual goal and constraints, and organize the result into clear sections: Context, Objective, Requirements, Constraints, and Desired Output. Include relevant technical details from the transcript, clarify ambiguous wording without inventing facts, and make the request actionable for implementation or debugging. Return only the final prompt as plain text. Avoid Markdown decoration such as emphasis, code fences, or heading symbols."),
             Some(default_mode.to_string()),
         ),
         "pro" => (
-            Some("Rewrite in a professional business tone for internal company communication. Be concise, clear, and decision-oriented. Use this structure when applicable: Executive Summary, Key Points, Action Items, and Next Steps. Keep bullets practical, and include owners or timelines only if explicitly mentioned in the transcript. Do not invent facts. Return only the final formatted text. Output plain text only (no Markdown symbols like **, #, -, *, or backticks)."),
+            Some("Rewrite the dictated transcript for professional internal business communication. Make it concise, calm, clear, and decision-oriented while preserving the speaker's intent and factual details. When useful, structure the output with plain-text section labels such as Summary, Key Points, Action Items, and Next Steps. Extract owners, dates, deadlines, and dependencies only if they are explicitly mentioned. Do not invent facts or overstate certainty. Return only the final text as plain text, with no preamble and no Markdown decoration."),
             Some(default_mode.to_string()),
         ),
         "bullets" => (
-            Some("Convert the transcript into concise bullet points. Fix Grammar and punctuation. Keep important details and remove filler. Return only bullet points. Use plain text bullets with '-' prefix only. Do not use Markdown emphasis like ** or headings with #."),
+            Some("Convert the dictated transcript into concise, useful bullet points. Correct grammar and punctuation, remove filler, merge duplicates, and keep the important details, decisions, dates, names, and follow-ups. Group related ideas together when it improves readability. Use only plain-text bullets with '-' as the bullet marker. Do not use Markdown emphasis, heading symbols, code fences, or explanatory preambles. Do not invent information."),
             Some(default_mode.to_string()),
         ),
         "chat" => (
-            Some("Rewrite the transcript into a concise chat message suitable for Slack, Teams, or personal messaging. Keep it natural and clear. Return only the message text. Output plain text only (no Markdown symbols like **, #, -, *, or backticks)."),
+            Some("Rewrite the dictated transcript as a concise chat message suitable for Slack, Teams, or personal messaging. Keep it natural, clear, and human, with the same intent and tone as the speaker. Remove filler and tighten wording, but do not make it overly formal. Use emojis only if the transcript clearly implies a casual tone, and never add new facts or commitments. Return only the message text as plain text, with no explanation and no Markdown decoration."),
             Some(default_mode.to_string()),
         ),
         "summary" => (
-            Some("Create a TL;DR summary in 2-4 short sentences covering the key points. Return only the summary. Output plain text only (no Markdown symbols like **, #, -, *, or backticks)."),
+            Some("Create a concise TL;DR summary of the dictated transcript. Capture the main point, key details, decisions, and next steps in 2-4 short sentences. Preserve factual accuracy and the speaker's intent. Do not add interpretation, advice, or facts that were not in the transcript. Return only the summary as plain text, with no title, preamble, bullets, or Markdown decoration."),
             Some(default_mode.to_string()),
         ),
         "clean" => (
-            Some("Fix grammar and punctuation. Preserve meaning and tone. Return only the corrected text, no explanation. Output plain text only (no Markdown symbols like **, #, -, *, or backticks)."),
-            Some(default_mode.to_string()),
-        ),
-        "translate" => (
-            Some("Translate to English. Return only the translation, no explanation or preamble. Output plain text only (no Markdown symbols like **, #, -, *, or backticks)."),
-            Some(default_mode.to_string()),
-        ),
-        "clean_translate" => (
-            Some("Fix grammar and punctuation, then translate to English. Return only the final corrected and translated text. Output plain text only (no Markdown symbols like **, #, -, *, or backticks)."),
+            Some("You are refining a dictated transcript. Correct grammar, punctuation, casing, and sentence boundaries while preserving the speaker's meaning, voice, intent, and level of formality. Remove obvious filler words, false starts, and repeated fragments only when they do not add meaning. Do not add new facts, names, dates, commitments, or explanations. Return only the polished text as plain text, with no preamble, labels, Markdown, bullets, or decorative formatting."),
             Some(default_mode.to_string()),
         ),
         _ => (None, None),
@@ -514,20 +525,7 @@ async fn set_ai_default_mode(
     state: tauri::State<'_, SharedState>,
     mode: String,
 ) -> Result<(), String> {
-    const VALID: &[&str] = &[
-        "raw",
-        "grammar",
-        "email",
-        "prompt",
-        "pro",
-        "bullets",
-        "chat",
-        "summary",
-        "clean",
-        "translate",
-        "clean_translate",
-    ];
-    if !VALID.contains(&mode.as_str()) {
+    if !is_valid_ai_default_mode(mode.as_str()) {
         return Err(format!("Unknown mode: {}", mode));
     }
     let changed = *state.ai_default_mode.lock().unwrap() != mode;
@@ -854,8 +852,6 @@ struct AppSettings {
     ai_model: String,
     #[serde(default = "default_ai_ollama_url")]
     ai_ollama_url: String,
-    #[serde(default)]
-    ai_target_language: String,
     #[serde(default = "default_stt_language")]
     stt_language: String,
     #[serde(default = "default_typing_baseline_wpm")]
@@ -2171,7 +2167,6 @@ fn save_app_settings(app: &AppHandle, state: SharedState) -> Result<(), String> 
         ai_backend: state.ai_backend.lock().unwrap().clone(),
         ai_model: state.ai_model.lock().unwrap().clone(),
         ai_ollama_url: state.ai_ollama_url.lock().unwrap().clone(),
-        ai_target_language: state.ai_target_language.lock().unwrap().clone(),
         stt_language: state.stt_language.lock().unwrap().clone(),
         typing_baseline_wpm: *state.typing_baseline_wpm.lock().unwrap(),
     };
@@ -2224,7 +2219,6 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     *state.asr_backend.lock().unwrap() = settings.asr_backend;
     *state.runtime_profile.lock().unwrap() = settings.runtime_profile;
     *state.onnx_provider.lock().unwrap() = settings.onnx_provider;
-    *state.ai_target_language.lock().unwrap() = settings.ai_target_language;
     *state.stt_language.lock().unwrap() = settings.stt_language;
     let keyring_token = load_hf_token_secret();
     *state.hf_token.lock().unwrap() = keyring_token.clone().or(settings.hf_token.clone());
@@ -2885,9 +2879,10 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     };
 
     let pending = state.streaming_pending.load(Ordering::SeqCst);
+    let streaming_parts_empty = state.streaming_parts.lock().unwrap().is_empty();
 
     // 4. Nothing at all — no speech.
-    if tail_samples.is_empty() && pending == 0 {
+    if has_no_recorded_audio(tail_samples.len(), pending, streaming_parts_empty) {
         *state.pending_transcript_meta.lock().unwrap() = None;
         app.emit(
             "transcription-error",
@@ -2908,14 +2903,9 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
 
     // 6. No-speech guard on the tail — but only reject if no streaming chunks are
     //    already in flight, to avoid discarding a whole long recording.
-    if pending == 0 {
+    if pending == 0 && streaming_parts_empty {
         let duration_sec = tail_16k.len() as f32 / 16_000.0;
-        let rms = if tail_16k.is_empty() {
-            0.0
-        } else {
-            let sum_sq: f32 = tail_16k.iter().map(|s| s * s).sum();
-            (sum_sq / tail_16k.len() as f32).sqrt()
-        };
+        let rms = rms_level(&tail_16k);
         if duration_sec < 0.20 || rms < 0.002 {
             *state.pending_transcript_meta.lock().unwrap() = None;
             let reason = if duration_sec < 0.20 {
@@ -2942,7 +2932,15 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
 
     // 8. Dispatch the tail chunk (if any).  For recordings < 29 s this is the only
     //    chunk; for longer recordings it's just the last few seconds.
+    let tail_was_empty = tail_16k.is_empty();
     if !tail_16k.is_empty() {
+        let chunk_index = state.streaming_chunks_started.fetch_add(1, Ordering::SeqCst) + 1;
+        let duration_sec = tail_16k.len() as f32 / 16_000.0;
+        let rms = rms_level(&tail_16k);
+        eprintln!(
+            "[chunk] tail {} duration={:.2}s rms={:.6} action=send",
+            chunk_index, duration_sec, rms
+        );
         normalize_audio(&mut tail_16k);
 
         // Ensure the worker process is running (may have been offloaded).
@@ -2954,12 +2952,8 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
             }
         }
 
-        let before = state.streaming_pending.load(Ordering::SeqCst);
-        send_chunk_to_worker(&state, tail_16k);
-        let after = state.streaming_pending.load(Ordering::SeqCst);
-
         // If the send failed (sidecar not responding), clean up and report.
-        if after == before {
+        if !send_chunk_to_worker(&state, tail_16k) {
             *state.pending_transcript_meta.lock().unwrap() = None;
             app.emit(
                 "transcription-error",
@@ -2972,6 +2966,13 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
     }
     // If tail is empty but pending > 0: streaming chunks are still in flight.
     // The stdout reader handles finalization when the last one arrives.
+    if tail_was_empty && pending == 0 {
+        let app_done = app.clone();
+        let state_done = state.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            complete_transcript_from_streaming_parts(&app_done, &state_done);
+        });
+    }
 }
 
 // ─── Rust Worker Sidecar ──────────────────────────────────────────────────────
@@ -3063,31 +3064,313 @@ fn finish_transcript_request(state: &SharedState) {
     state.streaming_parts.lock().unwrap().clear();
     state.streaming_pending.store(0, Ordering::SeqCst);
     state.streaming_samples_dispatched.store(0, Ordering::SeqCst);
+    state.streaming_chunks_started.store(0, Ordering::SeqCst);
+    state.streaming_chunks_completed.store(0, Ordering::SeqCst);
+}
+
+fn should_finalize_streamed_transcript(
+    recording_active: bool,
+    remaining_chunks: usize,
+    finalization_ready: bool,
+) -> bool {
+    !recording_active && remaining_chunks == 0 && finalization_ready
+}
+
+fn has_no_recorded_audio(
+    tail_sample_count: usize,
+    pending_chunks: usize,
+    streaming_parts_empty: bool,
+) -> bool {
+    tail_sample_count == 0 && pending_chunks == 0 && streaming_parts_empty
+}
+
+fn rms_level(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkCompletion {
+    Wait,
+    Ready,
+    Unexpected,
+}
+
+fn is_nonfatal_empty_chunk_error(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("recognizer returned no result")
+}
+
+fn reserve_streaming_chunk(state: &SharedState, wav_path: PathBuf, sample_count: usize) {
+    state.streaming_wav_paths.lock().unwrap().push(wav_path);
+    state.streaming_pending.fetch_add(1, Ordering::SeqCst);
+    state
+        .streaming_samples_dispatched
+        .fetch_add(sample_count, Ordering::SeqCst);
+    state.sidecar_busy.store(true, Ordering::SeqCst);
+    state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
+    state.sidecar_standby.store(false, Ordering::SeqCst);
+}
+
+fn rollback_streaming_chunk_reservation(
+    state: &SharedState,
+    wav_path: &Path,
+    sample_count: usize,
+) {
+    state.streaming_wav_paths.lock().unwrap().retain(|path| path != wav_path);
+    let pending = state.streaming_pending.load(Ordering::SeqCst);
+    if pending > 0 {
+        state.streaming_pending.fetch_sub(1, Ordering::SeqCst);
+    }
+    let dispatched = state.streaming_samples_dispatched.load(Ordering::SeqCst);
+    state
+        .streaming_samples_dispatched
+        .store(dispatched.saturating_sub(sample_count), Ordering::SeqCst);
+}
+
+fn record_worker_chunk_result(state: &SharedState, chunk_text: &str) -> ChunkCompletion {
+    let completed_index = state
+        .streaming_chunks_completed
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+    let chunk_text = chunk_text.trim();
+    if !chunk_text.is_empty() {
+        state
+            .streaming_parts
+            .lock()
+            .unwrap()
+            .push(chunk_text.to_string());
+    }
+
+    let was = state.streaming_pending.fetch_sub(1, Ordering::SeqCst);
+    if was == 0 {
+        state.streaming_pending.store(0, Ordering::SeqCst);
+        eprintln!(
+            "[chunk] worker result {} arrived with no pending chunk; text_len={}",
+            completed_index,
+            chunk_text.len()
+        );
+        return ChunkCompletion::Unexpected;
+    }
+
+    let remaining = was - 1;
+    let finalization_ready = state
+        .pending_transcript_meta
+        .lock()
+        .unwrap()
+        .is_some();
+    eprintln!(
+        "[chunk] worker result {} text_len={} remaining={} finalization_ready={}",
+        completed_index,
+        chunk_text.len(),
+        remaining,
+        finalization_ready
+    );
+    if should_finalize_streamed_transcript(
+        state.recording.load(Ordering::SeqCst),
+        remaining,
+        finalization_ready,
+    ) {
+        ChunkCompletion::Ready
+    } else {
+        ChunkCompletion::Wait
+    }
+}
+
+fn complete_transcript_from_streaming_parts(app_stdout: &AppHandle, state_for_stdout: &SharedState) {
+    // All chunks done. Build the final transcript from all parts.
+    let transcript = {
+        let parts = state_for_stdout.streaming_parts.lock().unwrap();
+        parts.join(" ").trim().to_string()
+    };
+
+    if transcript.is_empty() {
+        let _ = app_stdout.emit(
+            "transcription-error",
+            serde_json::json!({"message": "No speech detected."}),
+        );
+        hide_voicebar(app_stdout);
+        finish_transcript_request(state_for_stdout);
+        return;
+    }
+    #[cfg(debug_assertions)]
+    println!("Transcript: {}", transcript);
+
+    let default_mode = state_for_stdout.ai_default_mode.lock().unwrap().clone();
+    let (effective_prompt, requested_ai_mode) = resolve_ai_prompt_and_mode(&default_mode);
+
+    let mut applied_ai_mode = None;
+    let ai_enabled = state_for_stdout.ai_enabled.load(Ordering::SeqCst);
+    let final_text = if ai_enabled {
+        if let Some(prompt) = effective_prompt {
+            let _ = app_stdout.emit(
+                "sidecar-status",
+                serde_json::json!({ "message": "Applying AI\u{2026}" }),
+            );
+
+            let backend = state_for_stdout.ai_backend.lock().unwrap().clone();
+            let model = state_for_stdout.ai_model.lock().unwrap().clone();
+            let ollama_url = state_for_stdout.ai_ollama_url.lock().unwrap().clone();
+            let api_key = match backend.as_str() {
+                "openai" => state_for_stdout
+                    .openai_api_key
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default(),
+                "gemini" => state_for_stdout
+                    .gemini_api_key
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default(),
+                "anthropic" => state_for_stdout
+                    .anthropic_api_key
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+
+            match tauri::async_runtime::block_on(apply_ai_with_prompt(
+                &state_for_stdout.http_client,
+                &transcript,
+                prompt,
+                &backend,
+                &model,
+                &api_key,
+                &ollama_url,
+            )) {
+                Ok(processed) => {
+                    let processed_trimmed = processed.trim().to_string();
+                    #[cfg(debug_assertions)]
+                    println!(
+                        "[ai] success backend={} model={} output_preview={:?}",
+                        backend,
+                        model,
+                        processed_trimmed.chars().take(240).collect::<String>()
+                    );
+                    if processed_trimmed.is_empty() {
+                        eprintln!(
+                            "[ai] empty output from backend={}, falling back to raw transcript",
+                            backend
+                        );
+                        transcript.clone()
+                    } else {
+                        applied_ai_mode = requested_ai_mode;
+                        processed_trimmed
+                    }
+                }
+                Err(e) => {
+                    eprintln!("AI post-processing failed: {}", e);
+                    let _ = app_stdout.emit(
+                        "ai-processing-error",
+                        serde_json::json!({ "message": e }),
+                    );
+                    if let Some(warning) = ai_warning_message(&e) {
+                        let _ = app_stdout.emit(
+                            "ai-processing-warning",
+                            serde_json::json!({ "message": warning }),
+                        );
+                        let _ = app_stdout.emit(
+                            "sidecar-status",
+                            serde_json::json!({ "message": warning }),
+                        );
+                    }
+                    transcript.clone()
+                }
+            }
+        } else {
+            transcript.clone()
+        }
+    } else {
+        transcript.clone()
+    };
+
+    if !final_text.trim().is_empty() {
+        #[cfg(debug_assertions)]
+        println!(
+            "[ai] paste final_text_len={} preview={:?}",
+            final_text.len(),
+            final_text.chars().take(240).collect::<String>()
+        );
+        hide_voicebar(app_stdout);
+        paste_text(app_stdout, &final_text);
+    } else {
+        eprintln!("[ai] final_text is empty, skipping paste");
+    }
+
+    let pending_meta = {
+        state_for_stdout
+            .pending_transcript_meta
+            .lock()
+            .unwrap()
+            .take()
+    };
+    if let Some(meta) = pending_meta {
+        let word_count = history::count_words(&final_text);
+        let record = history::TranscriptRecord {
+            id: format!("tr_{}", now_millis()),
+            created_at: iso_timestamp_now(),
+            text: final_text.clone(),
+            raw_text: transcript.clone(),
+            duration_seconds: meta.duration_seconds,
+            word_count,
+            wpm: history::calculate_wpm(word_count, meta.duration_seconds),
+            ai_mode: applied_ai_mode,
+        };
+        match transcript_history_path(app_stdout) {
+            Ok(path) => {
+                let _history_guard = state_for_stdout.history_write_lock.lock().unwrap();
+                if let Err(err) = history::append_history_record(
+                    &path,
+                    legacy_transcript_history_path(app_stdout)
+                        .ok()
+                        .flatten()
+                        .as_deref(),
+                    record,
+                ) {
+                    eprintln!("Failed to save transcript history: {}", err);
+                }
+            }
+            Err(err) => {
+                eprintln!("Failed to resolve transcript history path: {}", err);
+            }
+        }
+    }
+
+    let _ = app_stdout.emit(
+        "transcript-ready",
+        serde_json::json!({ "text": final_text }),
+    );
+    finish_transcript_request(state_for_stdout);
 }
 
 /// Save `samples_16k` to a temp WAV and send its path to the worker via stdin.
 /// Increments `streaming_pending` and `streaming_samples_dispatched` on success.
-fn send_chunk_to_worker(state: &SharedState, samples_16k: Vec<f32>) {
+fn send_chunk_to_worker(state: &SharedState, samples_16k: Vec<f32>) -> bool {
     let wav_path = std::env::temp_dir()
         .join(format!("OpenDicta_chunk_{}.wav", now_millis()));
     if save_wav(&samples_16k, &wav_path).is_err() {
-        return;
+        return false;
     }
     let n = samples_16k.len();
+    reserve_streaming_chunk(state, wav_path.clone(), n);
     let mut stdin_guard = state.sidecar_stdin.lock().unwrap();
     if let Some(stdin) = stdin_guard.as_mut() {
         if writeln!(stdin, "{}", wav_path.display()).is_ok() {
-            drop(stdin_guard);
-            state.streaming_wav_paths.lock().unwrap().push(wav_path);
-            state.streaming_pending.fetch_add(1, Ordering::SeqCst);
-            state.streaming_samples_dispatched.fetch_add(n, Ordering::SeqCst);
-            state.sidecar_busy.store(true, Ordering::SeqCst);
-            state.sidecar_last_used_ms.store(now_millis(), Ordering::SeqCst);
-            state.sidecar_standby.store(false, Ordering::SeqCst);
-            return;
+            return true;
         }
     }
+    drop(stdin_guard);
+    rollback_streaming_chunk_reservation(state, &wav_path, n);
     let _ = std::fs::remove_file(&wav_path);
+    false
 }
 
 #[tauri::command]
@@ -3212,6 +3495,21 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                 Ok(text) if text.starts_with("ERROR:") => {
                     let msg = text.strip_prefix("ERROR:").unwrap_or("").trim().to_string();
                     eprintln!("Sidecar error: {}", msg);
+                    if is_nonfatal_empty_chunk_error(&msg)
+                        && state_for_stdout.streaming_pending.load(Ordering::SeqCst) > 0
+                    {
+                        eprintln!("[chunk] treating worker no-result error as empty chunk");
+                        match record_worker_chunk_result(&state_for_stdout, "") {
+                            ChunkCompletion::Ready => {
+                                complete_transcript_from_streaming_parts(
+                                    &app_stdout,
+                                    &state_for_stdout,
+                                );
+                            }
+                            ChunkCompletion::Wait | ChunkCompletion::Unexpected => {}
+                        }
+                        continue;
+                    }
                     app_stdout
                         .emit("transcription-error", serde_json::json!({"message": msg}))
                         .ok();
@@ -3235,201 +3533,15 @@ fn spawn_sidecar(app: AppHandle, state: SharedState) {
                         .trim()
                         .to_string();
 
-                    // Accumulate non-empty chunk texts.
-                    if !chunk_text.is_empty() {
-                        state_for_stdout.streaming_parts.lock().unwrap().push(chunk_text);
-                    }
-
-                    // Decrement the pending counter.  fetch_sub returns the OLD value.
-                    let was = state_for_stdout.streaming_pending.fetch_sub(1, Ordering::SeqCst);
-                    if was == 0 {
-                        // Shouldn't happen, but guard against AtomicUsize underflow.
-                        state_for_stdout.streaming_pending.store(0, Ordering::SeqCst);
-                        continue;
-                    }
-                    let remaining = was - 1;
-                    if remaining > 0 {
-                        // More chunks are still being processed — wait for them.
-                        continue;
-                    }
-
-                    // All chunks done. Build the final transcript from all parts.
-                    let transcript = {
-                        let parts = state_for_stdout.streaming_parts.lock().unwrap();
-                        parts.join(" ").trim().to_string()
-                    };
-
-                    if transcript.is_empty() {
-                        let _ = app_stdout.emit(
-                            "transcription-error",
-                            serde_json::json!({"message": "No speech detected."}),
-                        );
-                        hide_voicebar(&app_stdout);
-                        finish_transcript_request(&state_for_stdout);
-                        continue;
-                    }
-                    #[cfg(debug_assertions)]
-                    println!("Transcript: {}", transcript);
-
-                    let default_mode = state_for_stdout.ai_default_mode.lock().unwrap().clone();
-                    let (effective_prompt, requested_ai_mode) =
-                        resolve_ai_prompt_and_mode(&default_mode);
-
-                    let mut applied_ai_mode = None;
-                    let ai_enabled = state_for_stdout.ai_enabled.load(Ordering::SeqCst);
-                    let final_text = if ai_enabled {
-                        if let Some(prompt) = effective_prompt {
-                            // Notify the UI that we are applying AI
-                            let _ = app_stdout.emit(
-                                "sidecar-status",
-                                serde_json::json!({ "message": "Applying AI\u{2026}" }),
+                    match record_worker_chunk_result(&state_for_stdout, &chunk_text) {
+                        ChunkCompletion::Ready => {
+                            complete_transcript_from_streaming_parts(
+                                &app_stdout,
+                                &state_for_stdout,
                             );
-
-                            let backend = state_for_stdout.ai_backend.lock().unwrap().clone();
-                            let model = state_for_stdout.ai_model.lock().unwrap().clone();
-                            let ollama_url = state_for_stdout.ai_ollama_url.lock().unwrap().clone();
-                            // Read from the encrypted in-memory store (loaded at startup via DPAPI
-                            // on Windows, OS keyring on other platforms). Never re-read from disk here.
-                            let api_key = match backend.as_str() {
-                                "openai" => state_for_stdout
-                                    .openai_api_key
-                                    .lock()
-                                    .unwrap()
-                                    .clone()
-                                    .unwrap_or_default(),
-                                "gemini" => state_for_stdout
-                                    .gemini_api_key
-                                    .lock()
-                                    .unwrap()
-                                    .clone()
-                                    .unwrap_or_default(),
-                                "anthropic" => state_for_stdout
-                                    .anthropic_api_key
-                                    .lock()
-                                    .unwrap()
-                                    .clone()
-                                    .unwrap_or_default(),
-                                _ => String::new(), // Ollama needs no API key
-                            };
-
-                            match tauri::async_runtime::block_on(apply_ai_with_prompt(
-                                &state_for_stdout.http_client,
-                                &transcript,
-                                prompt,
-                                &backend,
-                                &model,
-                                &api_key,
-                                &ollama_url,
-                            )) {
-                                Ok(processed) => {
-                                    let processed_trimmed = processed.trim().to_string();
-                                    #[cfg(debug_assertions)]
-                                    println!(
-                                        "[ai] success backend={} model={} output_preview={:?}",
-                                        backend,
-                                        model,
-                                        processed_trimmed.chars().take(240).collect::<String>()
-                                    );
-                                    if processed_trimmed.is_empty() {
-                                        eprintln!(
-                                            "[ai] empty output from backend={}, falling back to raw transcript",
-                                            backend
-                                        );
-                                        transcript.clone()
-                                    } else {
-                                        applied_ai_mode = requested_ai_mode;
-                                        processed_trimmed
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("AI post-processing failed: {}", e);
-                                    let _ = app_stdout.emit(
-                                        "ai-processing-error",
-                                        serde_json::json!({ "message": e }),
-                                    );
-                                    if let Some(warning) = ai_warning_message(&e) {
-                                        let _ = app_stdout.emit(
-                                            "ai-processing-warning",
-                                            serde_json::json!({ "message": warning }),
-                                        );
-                                        let _ = app_stdout.emit(
-                                            "sidecar-status",
-                                            serde_json::json!({ "message": warning }),
-                                        );
-                                    }
-                                    // Fall back to raw transcript
-                                    transcript.clone()
-                                }
-                            }
-                        } else {
-                            transcript.clone()
                         }
-                    } else {
-                        transcript.clone()
-                    };
-
-                    // Auto-paste the result into the previously active app
-                    if !final_text.trim().is_empty() {
-                        #[cfg(debug_assertions)]
-                        println!(
-                            "[ai] paste final_text_len={} preview={:?}",
-                            final_text.len(),
-                            final_text.chars().take(240).collect::<String>()
-                        );
-                        // Ensure the voice bar window is hidden before we type,
-                        // so focus can return to the previously active app.
-                        hide_voicebar(&app_stdout);
-                        paste_text(&app_stdout, &final_text);
-                    } else {
-                        eprintln!("[ai] final_text is empty, skipping paste");
+                        ChunkCompletion::Wait | ChunkCompletion::Unexpected => {}
                     }
-
-                    let pending_meta = {
-                        state_for_stdout
-                            .pending_transcript_meta
-                            .lock()
-                            .unwrap()
-                            .take()
-                    };
-                    if let Some(meta) = pending_meta {
-                        let word_count = history::count_words(&final_text);
-                        let record = history::TranscriptRecord {
-                            id: format!("tr_{}", now_millis()),
-                            created_at: iso_timestamp_now(),
-                            text: final_text.clone(),
-                            raw_text: transcript.clone(),
-                            duration_seconds: meta.duration_seconds,
-                            word_count,
-                            wpm: history::calculate_wpm(word_count, meta.duration_seconds),
-                            ai_mode: applied_ai_mode,
-                        };
-                        match transcript_history_path(&app_stdout) {
-                            Ok(path) => {
-                                let _history_guard =
-                                    state_for_stdout.history_write_lock.lock().unwrap();
-                                if let Err(err) = history::append_history_record(
-                                    &path,
-                                    legacy_transcript_history_path(&app_stdout)
-                                        .ok()
-                                        .flatten()
-                                        .as_deref(),
-                                    record,
-                                ) {
-                                    eprintln!("Failed to save transcript history: {}", err);
-                                }
-                            }
-                            Err(err) => {
-                                eprintln!("Failed to resolve transcript history path: {}", err);
-                            }
-                        }
-                    }
-
-                    // Notify the Voice Bar UI
-                    let _ = app_stdout.emit(
-                        "transcript-ready",
-                        serde_json::json!({ "text": final_text }),
-                    );
-                    finish_transcript_request(&state_for_stdout);
                 }
                 Ok(other) => {
                     // Ignore non-protocol stdout noise from dependencies.
@@ -3907,6 +4019,8 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
     state.streaming_pending.store(0, Ordering::SeqCst);
     state.streaming_wav_paths.lock().unwrap().clear();
     state.streaming_samples_dispatched.store(0, Ordering::SeqCst);
+    state.streaming_chunks_started.store(0, Ordering::SeqCst);
+    state.streaming_chunks_completed.store(0, Ordering::SeqCst);
 
     start_audio_capture(
         app.clone(),
@@ -3954,15 +4068,30 @@ fn handle_shortcut_pressed(app: AppHandle, state: SharedState, shortcut: String)
                 };
                 let mut samples_16k = resample_to_16khz(&chunk, device_rate);
                 // Skip truly silent chunks (rare ambient noise burst)
-                let rms = {
-                    let sum_sq: f32 = samples_16k.iter().map(|s| s * s).sum();
-                    (sum_sq / samples_16k.len() as f32).sqrt()
-                };
+                let chunk_index = state_cf
+                    .streaming_chunks_started
+                    .fetch_add(1, Ordering::SeqCst)
+                    + 1;
+                let duration_sec = samples_16k.len() as f32 / 16_000.0;
+                let rms = rms_level(&samples_16k);
                 if rms < 0.002 {
+                    eprintln!(
+                        "[chunk] streaming {} duration={:.2}s rms={:.6} action=skip_silent",
+                        chunk_index, duration_sec, rms
+                    );
                     continue;
                 }
+                eprintln!(
+                    "[chunk] streaming {} duration={:.2}s rms={:.6} action=send",
+                    chunk_index, duration_sec, rms
+                );
                 normalize_audio(&mut samples_16k);
-                send_chunk_to_worker(&state_cf, samples_16k);
+                if !send_chunk_to_worker(&state_cf, samples_16k) {
+                    eprintln!(
+                        "[chunk] streaming {} send_failed=true",
+                        chunk_index
+                    );
+                }
             }
         });
     }
@@ -4321,7 +4450,7 @@ mod ai_settings_tests {
 
     #[test]
     fn default_ai_preset_is_raw() {
-        assert_eq!(default_ai_model(), "raw");
+        assert_eq!(default_ai_default_mode(), "raw");
     }
 
     #[test]
@@ -4396,6 +4525,93 @@ mod ai_settings_tests {
     }
 
     #[test]
+    fn streamed_chunk_completion_waits_while_recording_is_active() {
+        assert!(!should_finalize_streamed_transcript(true, 0, true));
+        assert!(!should_finalize_streamed_transcript(true, 2, true));
+    }
+
+    #[test]
+    fn streamed_chunk_completion_runs_after_recording_has_stopped_and_pending_is_empty() {
+        assert!(should_finalize_streamed_transcript(false, 0, true));
+        assert!(!should_finalize_streamed_transcript(false, 1, true));
+        assert!(!should_finalize_streamed_transcript(false, 0, false));
+    }
+
+    #[test]
+    fn finalize_accepts_already_transcribed_streamed_parts_without_tail_audio() {
+        assert!(!has_no_recorded_audio(0, 0, false));
+        assert!(has_no_recorded_audio(0, 0, true));
+        assert!(!has_no_recorded_audio(0, 1, true));
+        assert!(!has_no_recorded_audio(16000, 0, true));
+    }
+
+    #[test]
+    fn empty_chunk_completion_keeps_existing_streaming_parts() {
+        let state: SharedState = Arc::new(AppState::new());
+        state.streaming_parts.lock().unwrap().push("first part".to_string());
+        state.streaming_pending.store(1, Ordering::SeqCst);
+        *state.pending_transcript_meta.lock().unwrap() = Some(PendingTranscriptMeta {
+            duration_seconds: 58.0,
+        });
+
+        let completion = record_worker_chunk_result(&state, "");
+
+        assert_eq!(completion, ChunkCompletion::Ready);
+        assert_eq!(state.streaming_pending.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state.streaming_parts.lock().unwrap().as_slice(),
+            ["first part"]
+        );
+    }
+
+    #[test]
+    fn long_recording_state_machine_keeps_text_around_empty_middle_chunk() {
+        let state: SharedState = Arc::new(AppState::new());
+        state.streaming_pending.store(3, Ordering::SeqCst);
+        *state.pending_transcript_meta.lock().unwrap() = Some(PendingTranscriptMeta {
+            duration_seconds: 87.0,
+        });
+
+        assert_eq!(record_worker_chunk_result(&state, "first part"), ChunkCompletion::Wait);
+        assert_eq!(record_worker_chunk_result(&state, ""), ChunkCompletion::Wait);
+        assert_eq!(record_worker_chunk_result(&state, "final part"), ChunkCompletion::Ready);
+
+        assert_eq!(state.streaming_pending.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state.streaming_parts.lock().unwrap().as_slice(),
+            ["first part", "final part"]
+        );
+    }
+
+    #[test]
+    fn no_result_worker_error_is_nonfatal_empty_chunk() {
+        assert!(is_nonfatal_empty_chunk_error(
+            "Transcription failed — recognizer returned no result"
+        ));
+        assert!(!is_nonfatal_empty_chunk_error(
+            "Could not load ASR model — missing encoder"
+        ));
+    }
+
+    #[test]
+    fn chunk_reservation_registers_pending_before_send_can_complete() {
+        let state: SharedState = Arc::new(AppState::new());
+        let path = std::env::temp_dir().join("OpenDicta-test-reserved-chunk.wav");
+
+        reserve_streaming_chunk(&state, path.clone(), 16_000);
+
+        assert_eq!(state.streaming_pending.load(Ordering::SeqCst), 1);
+        assert_eq!(state.streaming_samples_dispatched.load(Ordering::SeqCst), 16_000);
+        assert!(state.streaming_wav_paths.lock().unwrap().contains(&path));
+
+        rollback_streaming_chunk_reservation(&state, &path, 16_000);
+
+        assert_eq!(state.streaming_pending.load(Ordering::SeqCst), 0);
+        assert_eq!(state.streaming_samples_dispatched.load(Ordering::SeqCst), 0);
+        assert!(!state.streaming_wav_paths.lock().unwrap().contains(&path));
+    }
+
+    #[test]
     fn timestamp_helpers_format_unix_seconds_as_utc_iso() {
         assert_eq!(unix_seconds_to_iso(0), "1970-01-01T00:00:00Z");
         assert_eq!(unix_seconds_to_iso(1_778_932_800), "2026-05-16T12:00:00Z");
@@ -4425,6 +4641,23 @@ mod ai_settings_tests {
         let (prompt, mode) = resolve_ai_prompt_and_mode("email");
         assert!(prompt.is_some());
         assert_eq!(mode.as_deref(), Some("email"));
+    }
+
+    #[test]
+    fn removed_translate_modes_do_not_resolve_prompts() {
+        for removed in ["translate", "clean_translate"] {
+            let (prompt, mode) = resolve_ai_prompt_and_mode(removed);
+            assert!(prompt.is_none(), "expected no prompt for removed mode {removed}");
+            assert!(mode.is_none(), "expected no history mode for removed mode {removed}");
+        }
+    }
+
+    #[test]
+    fn removed_translate_modes_are_not_valid_default_modes() {
+        assert!(!is_valid_ai_default_mode("translate"));
+        assert!(!is_valid_ai_default_mode("clean_translate"));
+        assert!(is_valid_ai_default_mode("grammar"));
+        assert!(is_valid_ai_default_mode("raw"));
     }
 
     #[test]
