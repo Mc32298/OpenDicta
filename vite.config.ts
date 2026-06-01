@@ -12,7 +12,7 @@ export default defineConfig(async () => ({
     allowedHosts: ["code.spinop.com"],
     // Tell Vite to watch everything except the Rust source
     watch: {
-      ignored: ["**/src-tauri/**"],
+      ignored: ["**/src-tauri/**", "**/target/**"],
     },
   },
 }));

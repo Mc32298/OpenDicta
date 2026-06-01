@@ -1,6 +1,6 @@
 [package]
 name = "opendicta"
-version = "0.1.8"
+version = "0.2.1"
 description = "Push-to-talk speech-to-text app"
 authors = []
 edition = "2021"
