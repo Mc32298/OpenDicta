@@ -7,7 +7,7 @@ const PROVIDERS = [
   { id: "gemini", name: "Gemini",  sub: "Google · Fast + cheap",  models: ["gemini-2.5-flash", "gemini-2.5-pro"], color: "oklch(72% 0.13 220)", mark: "G" },
   { id: "openai", name: "OpenAI",  sub: "Industry standard",       models: ["gpt-4o", "gpt-4o-mini"],              color: "oklch(70% 0.13 150)", mark: "◯" },
   { id: "claude", name: "Claude",  sub: "Anthropic · Best prose",  models: ["claude-sonnet-4", "claude-haiku-4"],  color: "oklch(70% 0.13 50)",  mark: "※" },
-  { id: "ollama", name: "Ollama",  sub: "Local models",             models: ["llama3.1:8b", "qwen2.5:7b"],          color: "oklch(68% 0.1 255)", mark: "◉" },
+  { id: "ollama", name: "Ollama",  sub: "Local models",             models: ["qwen2.5:7b", "llama3.1:8b"],          color: "oklch(68% 0.1 255)", mark: "◉" },
 ];
 
 type ProviderId = "gemini" | "openai" | "claude" | "ollama";
@@ -64,7 +64,7 @@ export default function AI({ aiEnabled, setAiEnabled }: { aiEnabled: boolean; se
         const p = backendToProvider(s.backend);
         setProvider(p);
         const providerModels = PROVIDERS.find((x) => x.id === p)?.models ?? [];
-        setSelectedModel(providerModels.includes(s.model) ? s.model : providerModels[0] ?? s.model);
+        setSelectedModel(s.model || providerModels[0] || "");
         setOllamaUrl(s.ollama_url || "http://localhost:11434");
         setSavedKeyForProvider((prev) => ({ ...prev, [p]: Boolean(s.api_key_masked) }));
       })
