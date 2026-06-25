@@ -32,7 +32,10 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+#[cfg(target_os = "windows")]
 const DEFAULT_SHORTCUT: &str = "Ctrl+-";
+#[cfg(not(target_os = "windows"))]
+const DEFAULT_SHORTCUT: &str = "F8";
 const DEFAULT_PUSH_TO_TALK_SHORTCUT: &str = "F6";
 const DEFAULT_STOP_DISCARD_SHORTCUT: &str = "Esc";
 const DEFAULT_REFINE_AI_SHORTCUT: &str = "Ctrl+Shift+R";
@@ -69,6 +72,279 @@ fn native_vk_code(hotkey: &str) -> Option<i32> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn native_linux_key_code(hotkey: &str) -> Option<evdev::Key> {
+    match hotkey {
+        "ControlRight" => Some(evdev::Key::KEY_RIGHTCTRL),
+        "ControlLeft"  => Some(evdev::Key::KEY_LEFTCTRL),
+        "ShiftRight"   => Some(evdev::Key::KEY_RIGHTSHIFT),
+        "ShiftLeft"    => Some(evdev::Key::KEY_LEFTSHIFT),
+        "AltRight"     => Some(evdev::Key::KEY_RIGHTALT),
+        "AltLeft"      => Some(evdev::Key::KEY_LEFTALT),
+        "MetaRight"    => Some(evdev::Key::KEY_RIGHTMETA),
+        "MetaLeft"     => Some(evdev::Key::KEY_LEFTMETA),
+        "CapsLock"     => Some(evdev::Key::KEY_CAPSLOCK),
+        _              => None,
+    }
+}
+
+// ─── Linux evdev shortcut engine ─────────────────────────────────────────────
+//
+// Tauri's global_shortcut plugin uses X11 internally and does not work on
+// native Wayland sessions.  We replace it entirely on Linux with a blocking
+// evdev reader: one thread per keyboard device reads raw key events and
+// matches them against the active shortcut list.
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct LinuxEvdevShortcut {
+    raw: String,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    meta: bool,
+    trigger: LinuxEvdevTrigger,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+enum LinuxEvdevTrigger {
+    BareModifier(evdev::Key), // e.g. "ControlRight" — fires on press/release of that modifier
+    Key(evdev::Key),          // e.g. "Ctrl+-" — fires when trigger key pressed with required mods
+}
+
+#[cfg(target_os = "linux")]
+static EVDEV_SHORTCUTS: std::sync::OnceLock<Arc<Mutex<Vec<LinuxEvdevShortcut>>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+static EVDEV_INIT_ERROR: std::sync::OnceLock<Option<String>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn evdev_shortcuts() -> Arc<Mutex<Vec<LinuxEvdevShortcut>>> {
+    EVDEV_SHORTCUTS
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .clone()
+}
+
+#[cfg(target_os = "linux")]
+fn base_str_to_evdev_key(s: &str) -> Option<evdev::Key> {
+    use evdev::Key;
+    match s {
+        "A" => Some(Key::KEY_A), "B" => Some(Key::KEY_B), "C" => Some(Key::KEY_C),
+        "D" => Some(Key::KEY_D), "E" => Some(Key::KEY_E), "F" => Some(Key::KEY_F),
+        "G" => Some(Key::KEY_G), "H" => Some(Key::KEY_H), "I" => Some(Key::KEY_I),
+        "J" => Some(Key::KEY_J), "K" => Some(Key::KEY_K), "L" => Some(Key::KEY_L),
+        "M" => Some(Key::KEY_M), "N" => Some(Key::KEY_N), "O" => Some(Key::KEY_O),
+        "P" => Some(Key::KEY_P), "Q" => Some(Key::KEY_Q), "R" => Some(Key::KEY_R),
+        "S" => Some(Key::KEY_S), "T" => Some(Key::KEY_T), "U" => Some(Key::KEY_U),
+        "V" => Some(Key::KEY_V), "W" => Some(Key::KEY_W), "X" => Some(Key::KEY_X),
+        "Y" => Some(Key::KEY_Y), "Z" => Some(Key::KEY_Z),
+        "0" => Some(Key::KEY_0), "1" => Some(Key::KEY_1), "2" => Some(Key::KEY_2),
+        "3" => Some(Key::KEY_3), "4" => Some(Key::KEY_4), "5" => Some(Key::KEY_5),
+        "6" => Some(Key::KEY_6), "7" => Some(Key::KEY_7), "8" => Some(Key::KEY_8),
+        "9" => Some(Key::KEY_9),
+        "F1"  => Some(Key::KEY_F1),  "F2"  => Some(Key::KEY_F2),
+        "F3"  => Some(Key::KEY_F3),  "F4"  => Some(Key::KEY_F4),
+        "F5"  => Some(Key::KEY_F5),  "F6"  => Some(Key::KEY_F6),
+        "F7"  => Some(Key::KEY_F7),  "F8"  => Some(Key::KEY_F8),
+        "F9"  => Some(Key::KEY_F9),  "F10" => Some(Key::KEY_F10),
+        "F11" => Some(Key::KEY_F11), "F12" => Some(Key::KEY_F12),
+        "-"   => Some(Key::KEY_MINUS),       "="  => Some(Key::KEY_EQUAL),
+        "["   => Some(Key::KEY_LEFTBRACE),   "]"  => Some(Key::KEY_RIGHTBRACE),
+        "\\"  => Some(Key::KEY_BACKSLASH),   ";"  => Some(Key::KEY_SEMICOLON),
+        "'"   => Some(Key::KEY_APOSTROPHE),  ","  => Some(Key::KEY_COMMA),
+        "."   => Some(Key::KEY_DOT),         "/"  => Some(Key::KEY_SLASH),
+        "`"   => Some(Key::KEY_GRAVE),
+        "Space"    => Some(Key::KEY_SPACE),    "Enter"    => Some(Key::KEY_ENTER),
+        "Esc"      => Some(Key::KEY_ESC),      "Backspace"=> Some(Key::KEY_BACKSPACE),
+        "Tab"      => Some(Key::KEY_TAB),      "Up"       => Some(Key::KEY_UP),
+        "Down"     => Some(Key::KEY_DOWN),     "Left"     => Some(Key::KEY_LEFT),
+        "Right"    => Some(Key::KEY_RIGHT),    "Insert"   => Some(Key::KEY_INSERT),
+        "Delete"   => Some(Key::KEY_DELETE),   "Home"     => Some(Key::KEY_HOME),
+        "End"      => Some(Key::KEY_END),      "PageUp"   => Some(Key::KEY_PAGEUP),
+        "PageDown" => Some(Key::KEY_PAGEDOWN),
+        "NumpadAdd"      => Some(Key::KEY_KPPLUS),
+        "NumpadSubtract" => Some(Key::KEY_KPMINUS),
+        "NumpadMultiply" => Some(Key::KEY_KPASTERISK),
+        "NumpadDivide"   => Some(Key::KEY_KPSLASH),
+        "NumpadDecimal"  => Some(Key::KEY_KPDOT),
+        "Numpad0" => Some(Key::KEY_KP0), "Numpad1" => Some(Key::KEY_KP1),
+        "Numpad2" => Some(Key::KEY_KP2), "Numpad3" => Some(Key::KEY_KP3),
+        "Numpad4" => Some(Key::KEY_KP4), "Numpad5" => Some(Key::KEY_KP5),
+        "Numpad6" => Some(Key::KEY_KP6), "Numpad7" => Some(Key::KEY_KP7),
+        "Numpad8" => Some(Key::KEY_KP8), "Numpad9" => Some(Key::KEY_KP9),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_shortcut(hotkey: &str) -> Option<LinuxEvdevShortcut> {
+    // Bare modifier keys ("ControlRight", "ShiftLeft", …)
+    if let Some(key) = native_linux_key_code(hotkey) {
+        return Some(LinuxEvdevShortcut {
+            raw: hotkey.to_string(),
+            ctrl: false, shift: false, alt: false, meta: false,
+            trigger: LinuxEvdevTrigger::BareModifier(key),
+        });
+    }
+    // Combo or single key — split on '+', last non-modifier token is the trigger
+    let mut ctrl = false;
+    let mut shift = false;
+    let mut alt = false;
+    let mut meta = false;
+    let mut trigger_key: Option<evdev::Key> = None;
+    for part in hotkey.split('+') {
+        match part {
+            "Ctrl"  => ctrl  = true,
+            "Shift" => shift = true,
+            "Alt"   => alt   = true,
+            "Super" => meta  = true,
+            other   => trigger_key = base_str_to_evdev_key(other),
+        }
+    }
+    Some(LinuxEvdevShortcut {
+        raw: hotkey.to_string(),
+        ctrl, shift, alt, meta,
+        trigger: LinuxEvdevTrigger::Key(trigger_key?),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn start_evdev_threads(app: AppHandle, state: SharedState) -> Result<(), String> {
+    // Idempotent: only start once per process lifetime
+    if state.right_ctrl_active.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    state.right_ctrl_stop.store(false, Ordering::SeqCst);
+
+    let keyboard_paths: Vec<std::path::PathBuf> = evdev::enumerate()
+        .filter_map(|(path, dev)| {
+            // Any device with full letter keys is a keyboard
+            if dev.supported_keys().map_or(false, |k| k.contains(evdev::Key::KEY_A)) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if keyboard_paths.is_empty() {
+        state.right_ctrl_active.store(false, Ordering::SeqCst);
+        let msg = "No keyboard input devices found. \
+                   The OpenDicta udev rule may not be active yet. \
+                   Try reinstalling or run: sudo udevadm trigger --subsystem-match=input"
+            .to_string();
+        let _ = EVDEV_INIT_ERROR.set(Some(msg.clone()));
+        return Err(msg);
+    }
+
+    // Verify we can actually open a keyboard device (permission check).
+    if let Some(first_path) = keyboard_paths.first() {
+        if let Err(e) = evdev::Device::open(first_path) {
+            state.right_ctrl_active.store(false, Ordering::SeqCst);
+            let msg = format!(
+                "Cannot read keyboard input ({}). \
+                 The udev rule may not have taken effect yet — \
+                 try logging out and back in.",
+                e
+            );
+            let _ = EVDEV_INIT_ERROR.set(Some(msg.clone()));
+            return Err(msg);
+        }
+    }
+
+    let _ = EVDEV_INIT_ERROR.set(None);
+
+    for path in keyboard_paths {
+        let stop       = state.right_ctrl_stop.clone();
+        let app_clone  = app.clone();
+        let state_clone = state.clone();
+        let shortcuts  = evdev_shortcuts();
+
+        std::thread::spawn(move || {
+            let mut device = match evdev::Device::open(&path) {
+                Ok(d)  => d,
+                Err(_) => return,
+            };
+
+            // Per-device modifier state
+            let mut ctrl_held  = false;
+            let mut shift_held = false;
+            let mut alt_held   = false;
+            let mut meta_held  = false;
+            // Track which shortcut raws are currently "down" so we can fire release
+            let mut active: Vec<String> = Vec::new();
+
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                match device.fetch_events() {
+                    Ok(events) => {
+                        for event in events {
+                            if stop.load(Ordering::SeqCst) { return; }
+                            if event.event_type() != evdev::EventType::KEY { continue; }
+
+                            let key   = evdev::Key(event.code());
+                            let value = event.value(); // 0=up 1=down 2=repeat
+
+                            // Update modifier tracking
+                            if key == evdev::Key::KEY_LEFTCTRL || key == evdev::Key::KEY_RIGHTCTRL {
+                                ctrl_held  = value != 0;
+                            } else if key == evdev::Key::KEY_LEFTSHIFT || key == evdev::Key::KEY_RIGHTSHIFT {
+                                shift_held = value != 0;
+                            } else if key == evdev::Key::KEY_LEFTALT || key == evdev::Key::KEY_RIGHTALT {
+                                alt_held   = value != 0;
+                            } else if key == evdev::Key::KEY_LEFTMETA || key == evdev::Key::KEY_RIGHTMETA {
+                                meta_held  = value != 0;
+                            }
+
+                            if value == 2 { continue; } // ignore auto-repeat
+
+                            let hk_list = shortcuts.lock().unwrap().clone();
+                            for sc in &hk_list {
+                                match &sc.trigger {
+                                    LinuxEvdevTrigger::BareModifier(mod_key) => {
+                                        if key == *mod_key {
+                                            if value == 1 && !active.contains(&sc.raw) {
+                                                active.push(sc.raw.clone());
+                                                handle_shortcut_pressed(app_clone.clone(), state_clone.clone(), sc.raw.clone());
+                                            } else if value == 0 {
+                                                active.retain(|s| s != &sc.raw);
+                                                handle_shortcut_released(app_clone.clone(), state_clone.clone(), sc.raw.clone());
+                                            }
+                                        }
+                                    }
+                                    LinuxEvdevTrigger::Key(trigger_key) => {
+                                        if key == *trigger_key {
+                                            let mods_match = sc.ctrl  == ctrl_held
+                                                && sc.shift == shift_held
+                                                && sc.alt   == alt_held
+                                                && sc.meta  == meta_held;
+                                            if value == 1 && mods_match && !active.contains(&sc.raw) {
+                                                active.push(sc.raw.clone());
+                                                handle_shortcut_pressed(app_clone.clone(), state_clone.clone(), sc.raw.clone());
+                                            } else if value == 0 && active.contains(&sc.raw) {
+                                                active.retain(|s| s != &sc.raw);
+                                                handle_shortcut_released(app_clone.clone(), state_clone.clone(), sc.raw.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => break, // device disconnected
+                }
+            }
+        });
+    }
+
+    Ok(())
+}
+
 fn is_modifier_only_shortcut(hotkey: &str) -> bool {
     matches!(
         hotkey,
@@ -81,6 +357,36 @@ fn is_modifier_only_shortcut(hotkey: &str) -> bool {
             | "MetaLeft"
             | "MetaRight"
     )
+}
+
+fn platform_supports_modifier_only_shortcuts() -> bool {
+    cfg!(any(target_os = "windows", target_os = "linux"))
+}
+
+fn shortcut_supported_on_this_platform(hotkey: &str) -> bool {
+    !is_modifier_only_shortcut(hotkey) || platform_supports_modifier_only_shortcuts()
+}
+
+fn unsupported_shortcut_message(hotkey: &str) -> String {
+    if is_modifier_only_shortcut(hotkey) && !platform_supports_modifier_only_shortcuts() {
+        return format!(
+            "Shortcut '{}' is not supported on Linux. Use a combo such as '{}' instead.",
+            hotkey, DEFAULT_SHORTCUT
+        );
+    }
+    format!("Shortcut '{}' could not be activated on this system", hotkey)
+}
+
+fn should_migrate_legacy_linux_main_shortcut(hotkey: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = hotkey;
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        matches!(hotkey, "Ctrl+-")
+    }
 }
 
 // ─── App State ────────────────────────────────────────────────────────────────
@@ -1209,6 +1515,9 @@ async fn set_shortcut_binding(
         if s.len() > 64 {
             return Err("Shortcut too long".to_string());
         }
+        if !shortcut_supported_on_this_platform(s) {
+            return Err(unsupported_shortcut_message(s));
+        }
         let main_shortcut = state.shortcut.lock().unwrap().clone();
         if s == &main_shortcut {
             return Err("That shortcut is already used by Record toggle".to_string());
@@ -1807,6 +2116,9 @@ async fn set_shortcut(
     if shortcut.len() > 64 {
         return Err("Shortcut string is too long".to_string());
     }
+    if !shortcut_supported_on_this_platform(shortcut.as_str()) {
+        return Err(unsupported_shortcut_message(shortcut.as_str()));
+    }
     if state.shortcut_push_to_talk.lock().unwrap().as_deref() == Some(shortcut.as_str())
         || state.shortcut_stop_discard.lock().unwrap().as_deref() == Some(shortcut.as_str())
         || state.shortcut_refine_ai.lock().unwrap().as_deref() == Some(shortcut.as_str())
@@ -2185,26 +2497,39 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     let Ok(settings) = serde_json::from_str::<AppSettings>(&text) else {
         return;
     };
-    *state.shortcut.lock().unwrap() = settings.shortcut;
+    *state.shortcut.lock().unwrap() = if settings.shortcut.trim().is_empty()
+        || !shortcut_supported_on_this_platform(settings.shortcut.trim())
+        || should_migrate_legacy_linux_main_shortcut(settings.shortcut.trim())
+    {
+        DEFAULT_SHORTCUT.to_string()
+    } else {
+        settings.shortcut
+    };
     *state.shortcut_push_to_talk.lock().unwrap() = if settings.shortcut_push_to_talk.trim().is_empty() {
         None
+    } else if !shortcut_supported_on_this_platform(settings.shortcut_push_to_talk.trim()) {
+        Some(DEFAULT_PUSH_TO_TALK_SHORTCUT.to_string())
     } else {
         Some(settings.shortcut_push_to_talk)
     };
     *state.shortcut_stop_discard.lock().unwrap() = if settings.shortcut_stop_discard.trim().is_empty() {
         None
+    } else if !shortcut_supported_on_this_platform(settings.shortcut_stop_discard.trim()) {
+        Some(DEFAULT_STOP_DISCARD_SHORTCUT.to_string())
     } else {
         Some(settings.shortcut_stop_discard)
     };
     *state.shortcut_refine_ai.lock().unwrap() = if settings.shortcut_refine_ai.trim().is_empty() {
         None
+    } else if !shortcut_supported_on_this_platform(settings.shortcut_refine_ai.trim()) {
+        Some(DEFAULT_REFINE_AI_SHORTCUT.to_string())
     } else {
         Some(settings.shortcut_refine_ai)
     };
     *state.shortcut_quick_switcher.lock().unwrap() =
         if settings.shortcut_quick_switcher.trim().is_empty() {
             None
-        } else if is_modifier_only_shortcut(settings.shortcut_quick_switcher.trim()) {
+        } else if !shortcut_supported_on_this_platform(settings.shortcut_quick_switcher.trim()) {
             Some(DEFAULT_QUICK_SWITCHER_SHORTCUT.to_string())
         } else {
             Some(settings.shortcut_quick_switcher)
@@ -2957,7 +3282,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
             *state.pending_transcript_meta.lock().unwrap() = None;
             app.emit(
                 "transcription-error",
-                serde_json::json!({"message": "STT engine is not running. Is opendicta-worker.exe built? Run: cargo build -p opendicta-worker"}),
+                serde_json::json!({"message": "STT engine is not running. Build the opendicta-worker sidecar with: cargo build -p opendicta-worker"}),
             ).ok();
             hide_voicebar(&app);
             state.sidecar_busy.store(false, Ordering::SeqCst);
@@ -3841,6 +4166,33 @@ fn paste_text(app: &AppHandle, text: &str) {
     }
 }
 
+// ─── Linux diagnostics ───────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct LinuxStatus {
+    wayland: bool,
+    xwayland: bool,
+    evdev_ok: bool,
+    evdev_error: Option<String>,
+    enigo_likely_ok: bool,
+}
+
+#[tauri::command]
+fn get_linux_status() -> Option<LinuxStatus> {
+    #[cfg(target_os = "linux")]
+    {
+        let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+        let xwayland = std::env::var("DISPLAY").is_ok();
+        let evdev_error = EVDEV_INIT_ERROR.get().and_then(|v| v.clone());
+        let evdev_ok = evdev_error.is_none();
+        // enigo uses libxdo (X11). On pure Wayland without XWayland it will fail.
+        let enigo_likely_ok = !wayland || xwayland;
+        return Some(LinuxStatus { wayland, xwayland, evdev_ok, evdev_error, enigo_likely_ok });
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
 // ─── System Tray ──────────────────────────────────────────────────────────────
 
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
@@ -3859,7 +4211,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id("main-tray")
         .icon(tray_icon)
         .menu(&menu)
-        .tooltip("OpenDicta — Press Right Ctrl to record")
+        .tooltip(format!("OpenDicta - Press {} to record", DEFAULT_SHORTCUT))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "settings" => open_settings(app),
             "quit" => app.exit(0),
@@ -3921,7 +4273,9 @@ fn register_hotkey(app: &AppHandle, state: SharedState, hotkey: &str) -> Result<
 fn uses_native_key_hook(hotkey: &str) -> bool {
     #[cfg(target_os = "windows")]
     { native_vk_code(hotkey).is_some() }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    { let _ = hotkey; true } // all shortcuts go through evdev on Linux
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     { let _ = hotkey; false }
 }
 
@@ -3935,8 +4289,19 @@ fn hotkey_is_registered(app: &AppHandle, state: &SharedState, hotkey: &str) -> b
 
 fn unregister_hotkey(app: &AppHandle, state: SharedState, hotkey: &str) -> Result<(), String> {
     if uses_native_key_hook(hotkey) {
-        state.right_ctrl_stop.store(true, Ordering::SeqCst);
-        state.right_ctrl_active.store(false, Ordering::SeqCst);
+        #[cfg(target_os = "linux")]
+        {
+            // Remove from evdev list; threads keep running for remaining shortcuts
+            evdev_shortcuts().lock().unwrap().retain(|s| s.raw != hotkey);
+            return Ok(());
+        }
+        #[cfg(target_os = "windows")]
+        {
+            state.right_ctrl_stop.store(true, Ordering::SeqCst);
+            state.right_ctrl_active.store(false, Ordering::SeqCst);
+            return Ok(());
+        }
+        #[allow(unreachable_code)]
         return Ok(());
     }
     if app.global_shortcut().is_registered(hotkey) {
@@ -4172,13 +4537,25 @@ fn register_native_key(
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn register_native_key(
+    app: &AppHandle,
+    state: SharedState,
+    hotkey: &str,
+) -> Result<(), String> {
+    let shortcut = parse_linux_shortcut(hotkey)
+        .ok_or_else(|| format!("Cannot map shortcut '{}' to evdev keys", hotkey))?;
+    evdev_shortcuts().lock().unwrap().push(shortcut);
+    start_evdev_threads(app.clone(), state)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn register_native_key(
     _app: &AppHandle,
     _state: SharedState,
     hotkey: &str,
 ) -> Result<(), String> {
-    Err(format!("Native key hook for '{}' is only supported on Windows in this build", hotkey))
+    Err(format!("Native key hook for '{}' is not supported on this platform", hotkey))
 }
 
 fn setup_hotkey(app: &AppHandle, state: SharedState) -> Result<(), String> {
@@ -4309,6 +4686,7 @@ pub fn run() {
             test_ai_connection,
             get_stt_language,
             set_stt_language,
+            get_linux_status,
         ])
         .setup(move |app| {
             // Hide from macOS Dock — we're a menu bar app
@@ -4340,7 +4718,9 @@ pub fn run() {
             );
 
             setup_tray(app.handle())?;
-            setup_hotkey(app.handle(), state.clone())?;
+            if let Err(e) = setup_hotkey(app.handle(), state.clone()) {
+                eprintln!("Shortcuts unavailable: {}. The app will run without global shortcuts.", e);
+            }
 
             // First-run onboarding flow.
             let model_ready = model_data_dir(app.handle())
