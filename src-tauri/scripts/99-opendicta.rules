@@ -1,0 +1,4 @@
+# Grant the currently logged-in seat user read access to raw keyboard input.
+# Required for global shortcuts on Wayland (evdev-based listener).
+# Uses systemd-logind uaccess tag — no group membership or re-login needed.
+KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess"
