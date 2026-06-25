@@ -1946,6 +1946,30 @@ async fn download_model(
     let bases = download_bases_for(&model_id);
     let total_files = specs.len();
 
+    // Check available disk space before starting (Unix only).
+    // Sum bytes of files not already verified; require 10% headroom.
+    #[cfg(unix)]
+    {
+        let needed: u64 = specs
+            .iter()
+            .filter(|s| !dir.join(s.name).exists())
+            .map(|s| s.expected_bytes)
+            .sum();
+        if needed > 0 {
+            if let Some(available) = available_disk_space_bytes(&dir) {
+                let required = (needed as f64 * 1.1) as u64;
+                if available < required {
+                    let needed_gb = required as f64 / 1_073_741_824.0;
+                    let avail_gb = available as f64 / 1_073_741_824.0;
+                    return Err(format!(
+                        "Not enough disk space. Need {:.1} GB, only {:.1} GB available.",
+                        needed_gb, avail_gb
+                    ));
+                }
+            }
+        }
+    }
+
     use futures_util::StreamExt;
 
     for (idx, spec) in specs.iter().enumerate() {
@@ -4203,6 +4227,21 @@ fn get_linux_status() -> Option<LinuxStatus> {
     }
     #[allow(unreachable_code)]
     None
+}
+
+/// Returns available bytes on the filesystem containing `path`, or None if unavailable.
+#[cfg(unix)]
+fn available_disk_space_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ret == 0 {
+        Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+    } else {
+        None
+    }
 }
 
 // ─── System Tray ──────────────────────────────────────────────────────────────
