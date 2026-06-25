@@ -241,6 +241,7 @@ fn start_evdev_threads(app: AppHandle, state: SharedState) -> Result<(), String>
                    Try reinstalling or run: sudo udevadm trigger --subsystem-match=input"
             .to_string();
         let _ = EVDEV_INIT_ERROR.set(Some(msg.clone()));
+        let _ = EVDEV_INIT_DONE.set(true);
         return Err(msg);
     }
 
@@ -255,6 +256,7 @@ fn start_evdev_threads(app: AppHandle, state: SharedState) -> Result<(), String>
                 e
             );
             let _ = EVDEV_INIT_ERROR.set(Some(msg.clone()));
+            let _ = EVDEV_INIT_DONE.set(true);
             return Err(msg);
         }
     }
