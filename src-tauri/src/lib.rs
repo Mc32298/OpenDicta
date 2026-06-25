@@ -2825,7 +2825,7 @@ fn open_onboarding(app: &AppHandle) {
         let _ = win.show();
         let _ = win.set_focus();
     } else {
-        let _ = tauri::WebviewWindowBuilder::new(
+        let builder = tauri::WebviewWindowBuilder::new(
             app,
             "onboarding",
             tauri::WebviewUrl::App("/?window=onboarding".into()),
@@ -2833,10 +2833,14 @@ fn open_onboarding(app: &AppHandle) {
         .title("OpenDicta Setup")
         .inner_size(760.0, 620.0)
         .resizable(false)
-        .decorations(false)
-        .transparent(false)
-        .center()
-        .build();
+        .transparent(false);
+
+        #[cfg(target_os = "linux")]
+        let builder = builder.decorations(true);
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.decorations(false);
+
+        let _ = builder.center().build();
     }
 }
 
@@ -2861,16 +2865,19 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
             let _ = win.emit("navigate-to-page", p);
         }
     } else {
-        let _ =
+        let builder =
             tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App(url.into()))
                 .title("OpenDicta")
                 .inner_size(width, height)
                 .min_inner_size(min_width, min_height)
-                .resizable(true)
-                .decorations(false)
-                .transparent(true)
-                .center()
-                .build();
+                .resizable(true);
+
+        #[cfg(target_os = "linux")]
+        let builder = builder.decorations(true).transparent(false);
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.decorations(false).transparent(true);
+
+        let _ = builder.center().build();
     }
 }
 
