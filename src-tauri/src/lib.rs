@@ -4126,19 +4126,21 @@ async fn apply_ai_with_prompt(
 fn paste_text(app: &AppHandle, text: &str) {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
+    // Always write to clipboard first — this works on both Wayland and X11.
+    let clipboard_ok = app
+        .clipboard()
+        .write_text(text.to_string())
+        .map(|_| true)
+        .unwrap_or_else(|e| {
+            eprintln!("Clipboard write failed: {}", e);
+            false
+        });
+
+    // Delay to ensure the original app regains focus before injecting keys.
+    std::thread::sleep(std::time::Duration::from_millis(360));
+
     match Enigo::new(&Settings::default()) {
         Ok(mut enigo) => {
-            // Delay to ensure the original app regains focus before typing.
-            std::thread::sleep(std::time::Duration::from_millis(360));
-            let clipboard_ok = app
-                .clipboard()
-                .write_text(text.to_string())
-                .map(|_| true)
-                .unwrap_or_else(|e| {
-                    eprintln!("Clipboard write failed: {}", e);
-                    false
-                });
-
             if clipboard_ok {
                 let mut pasted = true;
                 if let Err(e) = enigo.key(Key::Control, Direction::Press) {
@@ -4152,14 +4154,12 @@ fn paste_text(app: &AppHandle, text: &str) {
                 if let Err(e) = enigo.key(Key::Control, Direction::Release) {
                     eprintln!("Ctrl up failed: {}", e);
                 }
-
                 if pasted {
                     #[cfg(debug_assertions)]
                     println!("[ai] paste sent via clipboard+Ctrl+V");
                     return;
                 }
             }
-
             if let Err(e) = enigo.text(text) {
                 eprintln!("Paste typing fallback failed: {} — text: {}", e, text);
             } else {
@@ -4169,6 +4169,11 @@ fn paste_text(app: &AppHandle, text: &str) {
         }
         Err(e) => {
             eprintln!("Could not create enigo instance: {}", e);
+            // On pure Wayland without XWayland, enigo fails. The text is already
+            // in the clipboard — tell the UI to show a manual-paste hint.
+            if clipboard_ok {
+                let _ = app.emit("paste-manual-required", serde_json::json!({ "text": text }));
+            }
         }
     }
 }
