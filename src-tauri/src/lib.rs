@@ -122,6 +122,10 @@ static EVDEV_INIT_ERROR: std::sync::OnceLock<Option<String>> =
     std::sync::OnceLock::new();
 
 #[cfg(target_os = "linux")]
+static EVDEV_INIT_DONE: std::sync::OnceLock<bool> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
 fn evdev_shortcuts() -> Arc<Mutex<Vec<LinuxEvdevShortcut>>> {
     EVDEV_SHORTCUTS
         .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
@@ -341,6 +345,8 @@ fn start_evdev_threads(app: AppHandle, state: SharedState) -> Result<(), String>
             }
         });
     }
+
+    let _ = EVDEV_INIT_DONE.set(true);
 
     Ok(())
 }
@@ -1443,7 +1449,7 @@ async fn start_tutorial(app: AppHandle) -> Result<(), String> {
         let _ = win.set_focus();
         let _ = win.emit("start-tutorial", ());
     } else {
-        tauri::WebviewWindowBuilder::new(
+        let builder = tauri::WebviewWindowBuilder::new(
             &app,
             "onboarding",
             tauri::WebviewUrl::App("/?window=onboarding&phase=tour".into()),
@@ -1451,11 +1457,14 @@ async fn start_tutorial(app: AppHandle) -> Result<(), String> {
         .title("OpenDicta")
         .inner_size(820.0, 660.0)
         .resizable(false)
-        .decorations(false)
-        .transparent(false)
-        .center()
-        .build()
-        .map_err(|e| e.to_string())?;
+        .transparent(false);
+
+        #[cfg(target_os = "linux")]
+        let builder = builder.decorations(true);
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.decorations(false);
+
+        builder.center().build().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -4219,8 +4228,13 @@ fn get_linux_status() -> Option<LinuxStatus> {
     {
         let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
         let xwayland = std::env::var("DISPLAY").is_ok();
-        let evdev_error = EVDEV_INIT_ERROR.get().and_then(|v| v.clone());
-        let evdev_ok = evdev_error.is_none();
+        let evdev_done = EVDEV_INIT_DONE.get().is_some();
+        let evdev_error = if evdev_done {
+            EVDEV_INIT_ERROR.get().and_then(|v| v.clone())
+        } else {
+            Some("Shortcut listener not yet initialised".to_string())
+        };
+        let evdev_ok = evdev_done && evdev_error.is_none();
         // enigo uses libxdo (X11). On pure Wayland without XWayland it will fail.
         let enigo_likely_ok = !wayland || xwayland;
         return Some(LinuxStatus { wayland, xwayland, evdev_ok, evdev_error, enigo_likely_ok });
