@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import PageHead from "./PageHead";
 import { createShortcutCapture } from "../lib/shortcutCapture";
+import { DEFAULT_SHORTCUT } from "../lib/shortcutUtils";
 import { THEMES, usePrefs } from "../shell/prefs";
 import type { Prefs } from "../shell/prefs";
 import { useToast } from "../ui/toast";
@@ -45,6 +46,14 @@ type MicrophoneTestResult = {
   message: string;
 };
 
+type LinuxStatus = {
+  wayland: boolean;
+  xwayland: boolean;
+  evdev_ok: boolean;
+  evdev_error: string | null;
+  enigo_likely_ok: boolean;
+};
+
 export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: ReturnType<typeof usePrefs>[1] }) {
   const toast = useToast();
   const [s, setS] = useState({ menubar: true, autoUpdate: true });
@@ -56,7 +65,7 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   const [soundsEnabled, setSoundsEnabled] = useState(false);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [shortcuts, setShortcuts] = useState<Record<string, string>>({
-    record: "ControlRight",
+    record: DEFAULT_SHORTCUT,
     pushToTalk: "Hold Fn",
     stop: "Esc",
     quick: "Ctrl+Shift+Space",
@@ -68,9 +77,16 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   const [updateState, setUpdateState] = useState<UpdateState>(readStoredUpdateState);
   const [appVersion, setAppVersion] = useState<string>("");
   const [typingWpm, setTypingWpm] = useState(40);
+  const [linuxStatus, setLinuxStatus] = useState<LinuxStatus | null>(null);
 
   useEffect(() => {
     getVersion().then(setAppVersion).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    invoke<LinuxStatus | null>("get_linux_status")
+      .then(setLinuxStatus)
+      .catch(() => setLinuxStatus(null));
   }, []);
 
   useEffect(() => {
@@ -487,6 +503,9 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
             <Shortcut label="Stop and discard" value={captureValue(editingShortcut === "stop", capturePreview, shortcuts.stop)} editing={editingShortcut === "stop"} onEdit={() => { setCapturePreview(null); setEditingShortcut("stop"); }} />
             <Divider />
             <Shortcut label="Quick switcher" value={captureValue(editingShortcut === "quick", capturePreview, shortcuts.quick)} editing={editingShortcut === "quick"} onEdit={() => { setCapturePreview(null); setEditingShortcut("quick"); }} />
+            <div style={{ marginTop: 14, padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunken)", color: "var(--ink-3)", fontSize: 11.5, lineHeight: 1.45 }}>
+              Fedora GNOME Wayland uses compositor-controlled shortcuts and input. Microphone capture routes through PipeWire/ALSA; global shortcuts or paste may need a different binding if the session blocks synthetic Ctrl+V.
+            </div>
           </div>
 
           <div className="card" style={{ background: "var(--ink-1)", color: "oklch(95% 0.005 85)", borderColor: "transparent" }}>
@@ -517,6 +536,25 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
           </div>
         </div>
       </div>
+
+      {linuxStatus && (
+        <div className="card card-lg" style={{ marginTop: "var(--gap)" }}>
+          <div className="section-title" style={{ marginBottom: 12 }}>Linux / Wayland status</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <LinuxCheck ok={true} label={linuxStatus.wayland ? "Wayland session detected" : "X11 session (Wayland not active)"} />
+            <LinuxCheck ok={linuxStatus.evdev_ok} label={
+              linuxStatus.evdev_ok
+                ? "Keyboard input: accessible (global shortcuts active)"
+                : `Keyboard input: ${linuxStatus.evdev_error ?? "inaccessible"}`
+            } />
+            <LinuxCheck ok={linuxStatus.enigo_likely_ok} label={
+              linuxStatus.enigo_likely_ok
+                ? "Auto-paste: available (XWayland present)"
+                : "Auto-paste: limited — text is copied to clipboard, press Ctrl+V to paste"
+            } />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -590,6 +628,17 @@ function MicLevel({ level }: { level: number }) {
           transition: "background .12s",
         }} />;
       })}
+    </div>
+  );
+}
+
+function LinuxCheck({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 13, color: "var(--ink-2)" }}>
+      <span style={{ color: ok ? "oklch(64% 0.16 145)" : "oklch(65% 0.18 30)", fontWeight: 700, flexShrink: 0 }}>
+        {ok ? "✓" : "✗"}
+      </span>
+      <span style={{ lineHeight: 1.45 }}>{label}</span>
     </div>
   );
 }
