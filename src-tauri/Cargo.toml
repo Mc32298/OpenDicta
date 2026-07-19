@@ -56,3 +56,6 @@ windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse",
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
+# Access the underlying GTK window to stop the voicebar overlay from stealing
+# keyboard focus on GNOME/Wayland (set_focus_on_map). Matches Tauri's gtk 0.18.
+gtk = "0.18"

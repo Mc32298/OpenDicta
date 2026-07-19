@@ -1,4 +1,8 @@
-export const DEFAULT_SHORTCUT = "Ctrl+-";
+const IS_WINDOWS =
+  typeof navigator !== "undefined" &&
+  /Windows/i.test(navigator.userAgent);
+
+export const DEFAULT_SHORTCUT = IS_WINDOWS ? "Ctrl+-" : "F8";
 
 export function normalizeShortcutFromEvent(e: KeyboardEvent): string | null {
   const code = e.code;

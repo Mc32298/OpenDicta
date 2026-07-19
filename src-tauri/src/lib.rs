@@ -2214,6 +2214,138 @@ async fn reset_voicebar_position(
     Ok(())
 }
 
+/// Human-readable name for a cpal input device, or None if unavailable.
+fn cpal_device_name(d: &cpal::Device) -> Option<String> {
+    use cpal::traits::DeviceTrait;
+    d.description().map(|desc| desc.name().to_string()).ok()
+}
+
+/// ALSA/PipeWire exposes a "null" sink that opens successfully but only ever
+/// produces silence. Never auto-select it.
+#[cfg(target_os = "linux")]
+fn is_null_input(name: &str) -> bool {
+    name.contains("Discard all samples") || name.eq_ignore_ascii_case("null")
+}
+
+/// Prove a device actually works by building + starting a real f32 capture
+/// stream (the app captures f32 everywhere). On PipeWire systems ALSA's
+/// "default" PCM enumerates fine but fails `snd_pcm_hw_params` with EINVAL at
+/// stream-open time, so config-only checks are not enough — we must try to open.
+#[cfg(target_os = "linux")]
+fn input_device_opens(device: &cpal::Device) -> bool {
+    use cpal::traits::{DeviceTrait, StreamTrait};
+    let cfg = match device.default_input_config() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // The broken ALSA "default" device reports a bogus sample rate (u32::MAX).
+    let sr = cfg.sample_rate();
+    if sr == 0 || sr > 384_000 {
+        return false;
+    }
+    match device.build_input_stream(
+        &cfg.into(),
+        |_d: &[f32], _: &_| {},
+        |_e| {},
+        Some(std::time::Duration::from_millis(200)),
+    ) {
+        Ok(s) => s.play().is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Choose an input device that can actually be opened.
+///
+/// On Linux/PipeWire the saved preference or the ALSA "default" device is
+/// frequently unopenable, so we walk an ordered candidate list — saved
+/// preference, then the PipeWire/Pulse PCMs (which route to the user's
+/// system-selected source and reliably open), then the system default, then any
+/// other device — and return the first whose stream truly builds, skipping the
+/// silent "null" device.
+///
+/// On Windows/macOS behaviour is unchanged: honour the saved preference if it
+/// exists, otherwise the system default.
+#[cfg(target_os = "linux")]
+fn select_input_device(host: &cpal::Host, preferred: &Option<String>) -> Option<cpal::Device> {
+    use cpal::traits::HostTrait;
+    let mut candidates: Vec<cpal::Device> = Vec::new();
+
+    if let Some(name) = preferred {
+        if let Ok(iter) = host.input_devices() {
+            for d in iter {
+                if cpal_device_name(&d).as_deref() == Some(name.as_str()) {
+                    candidates.push(d);
+                }
+            }
+        }
+    }
+    if let Ok(iter) = host.input_devices() {
+        let mut pw = Vec::new();
+        let mut pulse = Vec::new();
+        for d in iter {
+            let n = cpal_device_name(&d).unwrap_or_default();
+            if n.contains("PipeWire") {
+                pw.push(d);
+            } else if n.eq_ignore_ascii_case("pulse") || n.contains("PulseAudio") {
+                pulse.push(d);
+            }
+        }
+        candidates.extend(pw);
+        candidates.extend(pulse);
+    }
+    if let Some(d) = host.default_input_device() {
+        candidates.push(d);
+    }
+    if let Ok(iter) = host.input_devices() {
+        for d in iter {
+            candidates.push(d);
+        }
+    }
+
+    for d in candidates {
+        let n = cpal_device_name(&d).unwrap_or_default();
+        if is_null_input(&n) {
+            continue;
+        }
+        if input_device_opens(&d) {
+            return Some(d);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn select_input_device(host: &cpal::Host, preferred: &Option<String>) -> Option<cpal::Device> {
+    use cpal::traits::HostTrait;
+    if let Some(name) = preferred {
+        if let Ok(iter) = host.input_devices() {
+            if let Some(d) = iter
+                .into_iter()
+                .find(|d| cpal_device_name(d).as_deref() == Some(name.as_str()))
+            {
+                return Some(d);
+            }
+        }
+    }
+    host.default_input_device()
+}
+
+/// Platform-appropriate "no mic" message for the transcription-error event.
+fn no_microphone_message() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "No microphone found. Check System Settings → Privacy & Security → Microphone.".to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "No usable microphone found. Make sure a microphone is connected and PipeWire/PulseAudio is running.".to_string()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        "No microphone found. Make sure a microphone is connected and enabled.".to_string()
+    }
+}
+
 #[derive(serde::Serialize)]
 struct AudioInputInfo {
     default_device: Option<String>,
@@ -2230,11 +2362,18 @@ async fn get_audio_input_info(
 
     let default_device = host.default_input_device().and_then(|d| d.description().map(|desc| desc.name().to_string()).ok());
 
+    // ALSA/PipeWire often exposes the same physical mic under several config
+    // nodes that share one description name (e.g. hw: vs plughw:). De-duplicate
+    // by name — otherwise the frontend <select> gets colliding keys/values and
+    // React silently drops entries, making a working mic look "unrecognised".
     let mut devices = Vec::new();
     if let Ok(iter) = host.input_devices() {
         for d in iter {
             if let Ok(desc) = d.description() {
-                devices.push(desc.name().to_string());
+                let name = desc.name().to_string();
+                if !devices.contains(&name) {
+                    devices.push(name);
+                }
             }
         }
     }
@@ -2256,25 +2395,16 @@ struct MicrophoneTestResult {
 async fn test_microphone(
     state: tauri::State<'_, SharedState>,
 ) -> Result<MicrophoneTestResult, String> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use cpal::traits::{DeviceTrait, StreamTrait};
     let host = cpal::default_host();
     let preferred_name = state.mic_device.lock().unwrap().clone();
 
-    let device = if let Some(ref name) = preferred_name {
-        host.input_devices()
-            .ok()
-            .and_then(|mut iter| iter.find(|d| d.description().map(|desc| desc.name().to_string()).ok().as_deref() == Some(name)))
-            .or_else(|| host.default_input_device())
-    } else {
-        host.default_input_device()
-    };
-
-    let device = match device {
+    let device = match select_input_device(&host, &preferred_name) {
         Some(d) => d,
         None => {
             return Ok(MicrophoneTestResult {
                 ok: false,
-                message: "No input device found.".to_string(),
+                message: "No usable input device found.".to_string(),
             })
         }
     };
@@ -2348,6 +2478,105 @@ async fn set_audio_input_device(
 
     *state.mic_device.lock().unwrap() = normalized;
     save_app_settings(&app, state.inner().clone())?;
+    Ok(())
+}
+
+/// Shared stop flag for the live mic-preview meter.
+fn mic_meter_stop() -> Arc<AtomicBool> {
+    static S: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+    S.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
+}
+
+/// Start/stop a native mic level meter that emits `mic-meter-level` (0.0–1.0).
+///
+/// Uses cpal (via `select_input_device`) rather than the webview's WebRTC
+/// `getUserMedia`, which WebKitGTK denies by default on Linux. Preview only —
+/// the recording pipeline is untouched.
+#[tauri::command]
+async fn set_mic_meter(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let stop = mic_meter_stop();
+    if !enabled {
+        stop.store(true, Ordering::SeqCst);
+        return Ok(());
+    }
+    // Restarting: signal any prior meter thread to exit, then claim a fresh run.
+    stop.store(true, Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    stop.store(false, Ordering::SeqCst);
+
+    let preferred = state.mic_device.lock().unwrap().clone();
+    let stop_thread = stop.clone();
+
+    std::thread::spawn(move || {
+        use cpal::traits::{DeviceTrait, StreamTrait};
+        let host = cpal::default_host();
+        let device = match select_input_device(&host, &preferred) {
+            Some(d) => d,
+            None => {
+                let _ = app.emit("mic-meter-level", 0.0f32);
+                return;
+            }
+        };
+        let cfg = match device.default_input_config() {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = app.emit("mic-meter-level", 0.0f32);
+                return;
+            }
+        };
+        let channels = cfg.channels() as usize;
+        let stream_cfg: cpal::StreamConfig = cfg.into();
+        let app_cb = app.clone();
+        let mut last_ms = 0u64;
+
+        let stream = device.build_input_stream(
+            &stream_cfg,
+            move |data: &[f32], _: &_| {
+                if channels == 0 {
+                    return;
+                }
+                let mut sum_sq = 0.0f32;
+                let mut count = 0usize;
+                for frame in data.chunks(channels) {
+                    let mono = frame.iter().sum::<f32>() / channels as f32;
+                    sum_sq += mono * mono;
+                    count += 1;
+                }
+                if count > 0 {
+                    let rms = (sum_sq / count as f32).sqrt();
+                    let level = (rms * 8.0).clamp(0.0, 1.0);
+                    let now = now_millis();
+                    if now.saturating_sub(last_ms) >= 33 {
+                        last_ms = now;
+                        let _ = app_cb.emit("mic-meter-level", level);
+                    }
+                }
+            },
+            |_e| {},
+            None,
+        );
+        let stream = match stream {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = app.emit("mic-meter-level", 0.0f32);
+                return;
+            }
+        };
+        if stream.play().is_err() {
+            let _ = app.emit("mic-meter-level", 0.0f32);
+            return;
+        }
+        while !stop_thread.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        drop(stream);
+        let _ = app.emit("mic-meter-level", 0.0f32);
+    });
+
     Ok(())
 }
 
@@ -2994,24 +3223,19 @@ fn start_audio_capture(
     stop_flag: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::traits::{DeviceTrait, StreamTrait};
 
         // Get the default host (CoreAudio on macOS, WASAPI on Windows)
         let host = cpal::default_host();
 
         let preferred_name = state.mic_device.lock().unwrap().clone();
-        let preferred_device = preferred_name.as_ref().and_then(|name| {
-            host.input_devices()
-                .ok()?
-                .find(|d| d.description().map(|desc| desc.name().to_string()).ok().as_deref() == Some(name))
-        });
 
-        let device = match preferred_device.or_else(|| host.default_input_device()) {
+        let device = match select_input_device(&host, &preferred_name) {
             Some(d) => d,
             None => {
                 app.emit(
                     "transcription-error",
-                    serde_json::json!({"message": "No microphone found. Check System Preferences → Privacy → Microphone."}),
+                    serde_json::json!({"message": no_microphone_message()}),
                 )
                 .ok();
                 stop_flag.store(false, Ordering::SeqCst);
@@ -4158,9 +4382,82 @@ async fn apply_ai_with_prompt(
 // We type the text directly — more reliable than clipboard on some systems.
 // On macOS the app needs Accessibility permission for this to work.
 
-fn paste_text(app: &AppHandle, text: &str) {
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+// ─── Linux paste via uinput ─────────────────────────────────────────────────
+//
+// On GNOME/Wayland every *synthetic* input path is gated behind the
+// RemoteDesktop portal: enigo's native libei path prompts directly, and its
+// XTEST path is silently relayed by XWayland through the SAME portal (Xwayland
+// calls ConnectToEIS on the app's behalf). Either way GNOME pops a "Remote
+// Desktop" permission dialog on every launch.
+//
+// Injecting the keystroke at the kernel level via /dev/uinput sidesteps all of
+// that: the compositor sees an ordinary hardware keyboard, so Ctrl+V needs no
+// portal permission and works identically on Wayland and X11. We reuse the
+// `evdev` crate already used for the global-shortcut listener, so there is no
+// new dependency. Access to /dev/uinput comes from the same udev `uaccess` rule
+// that grants the event devices.
 
+#[cfg(target_os = "linux")]
+fn linux_virtual_keyboard() -> &'static std::sync::Mutex<Option<evdev::uinput::VirtualDevice>> {
+    static KBD: std::sync::OnceLock<std::sync::Mutex<Option<evdev::uinput::VirtualDevice>>> =
+        std::sync::OnceLock::new();
+    KBD.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Create the virtual keyboard once at startup so the compositor has time to
+/// detect it before the first paste (freshly-created uinput devices drop their
+/// earliest events).
+#[cfg(target_os = "linux")]
+fn linux_init_virtual_keyboard() {
+    use evdev::{uinput::VirtualDeviceBuilder, AttributeSet, Key};
+    let mut keys = AttributeSet::<Key>::new();
+    keys.insert(Key::KEY_LEFTCTRL);
+    keys.insert(Key::KEY_V);
+
+    let built = (|| -> std::io::Result<evdev::uinput::VirtualDevice> {
+        VirtualDeviceBuilder::new()?
+            .name("OpenDicta Virtual Keyboard")
+            .with_keys(&keys)?
+            .build()
+    })();
+
+    match built {
+        Ok(dev) => {
+            *linux_virtual_keyboard().lock().unwrap() = Some(dev);
+            eprintln!("[opendicta] virtual keyboard (uinput) ready for paste");
+        }
+        Err(e) => eprintln!(
+            "[opendicta] could not create uinput virtual keyboard ({}). \
+             Auto-paste will fall back to a manual clipboard hint. \
+             Ensure the OpenDicta udev rule grants /dev/uinput access.",
+            e
+        ),
+    }
+}
+
+/// Emit Ctrl+V from the virtual keyboard. Small gaps between events ensure the
+/// compositor registers Ctrl as held while V is pressed.
+#[cfg(target_os = "linux")]
+fn linux_paste_ctrl_v() -> std::io::Result<()> {
+    use evdev::{EventType, InputEvent, Key};
+    let mut guard = linux_virtual_keyboard().lock().unwrap();
+    let dev = guard.as_mut().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "virtual keyboard not initialised")
+    })?;
+    let ctrl = Key::KEY_LEFTCTRL.code();
+    let v = Key::KEY_V.code();
+    let t = EventType::KEY;
+    dev.emit(&[InputEvent::new(t, ctrl, 1)])?;
+    std::thread::sleep(std::time::Duration::from_millis(12));
+    dev.emit(&[InputEvent::new(t, v, 1)])?;
+    std::thread::sleep(std::time::Duration::from_millis(12));
+    dev.emit(&[InputEvent::new(t, v, 0)])?;
+    std::thread::sleep(std::time::Duration::from_millis(12));
+    dev.emit(&[InputEvent::new(t, ctrl, 0)])?;
+    Ok(())
+}
+
+fn paste_text(app: &AppHandle, text: &str) {
     // Always write to clipboard first — this works on both Wayland and X11.
     let clipboard_ok = app
         .clipboard()
@@ -4174,40 +4471,60 @@ fn paste_text(app: &AppHandle, text: &str) {
     // Delay to ensure the original app regains focus before injecting keys.
     std::thread::sleep(std::time::Duration::from_millis(360));
 
-    match Enigo::new(&Settings::default()) {
-        Ok(mut enigo) => {
-            if clipboard_ok {
-                let mut pasted = true;
-                if let Err(e) = enigo.key(Key::Control, Direction::Press) {
-                    eprintln!("Ctrl down failed: {}", e);
-                    pasted = false;
-                }
-                if let Err(e) = enigo.key(Key::Unicode('v'), Direction::Click) {
-                    eprintln!("V click failed: {}", e);
-                    pasted = false;
-                }
-                if let Err(e) = enigo.key(Key::Control, Direction::Release) {
-                    eprintln!("Ctrl up failed: {}", e);
-                }
-                if pasted {
+    #[cfg(target_os = "linux")]
+    {
+        if clipboard_ok {
+            match linux_paste_ctrl_v() {
+                Ok(()) => {
                     #[cfg(debug_assertions)]
-                    println!("[ai] paste sent via clipboard+Ctrl+V");
+                    println!("[ai] paste sent via uinput Ctrl+V");
                     return;
                 }
-            }
-            if let Err(e) = enigo.text(text) {
-                eprintln!("Paste typing fallback failed: {} — text: {}", e, text);
-            } else {
-                #[cfg(debug_assertions)]
-                println!("[ai] paste sent via typing fallback");
+                Err(e) => {
+                    eprintln!("uinput paste failed: {} — falling back to manual hint", e);
+                }
             }
         }
-        Err(e) => {
-            eprintln!("Could not create enigo instance: {}", e);
-            // On pure Wayland without XWayland, enigo fails. The text is already
-            // in the clipboard — tell the UI to show a manual-paste hint.
-            if clipboard_ok {
-                let _ = app.emit("paste-manual-required", serde_json::json!({ "text": text }));
+        // Text is already on the clipboard — ask the UI to show a manual hint.
+        let _ = app.emit("paste-manual-required", serde_json::json!({ "text": text }));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+        match Enigo::new(&Settings::default()) {
+            Ok(mut enigo) => {
+                if clipboard_ok {
+                    let mut pasted = true;
+                    if let Err(e) = enigo.key(Key::Control, Direction::Press) {
+                        eprintln!("Ctrl down failed: {}", e);
+                        pasted = false;
+                    }
+                    if let Err(e) = enigo.key(Key::Unicode('v'), Direction::Click) {
+                        eprintln!("V click failed: {}", e);
+                        pasted = false;
+                    }
+                    if let Err(e) = enigo.key(Key::Control, Direction::Release) {
+                        eprintln!("Ctrl up failed: {}", e);
+                    }
+                    if pasted {
+                        #[cfg(debug_assertions)]
+                        println!("[ai] paste sent via clipboard+Ctrl+V");
+                        return;
+                    }
+                }
+                if let Err(e) = enigo.text(text) {
+                    eprintln!("Paste typing fallback failed: {} — text: {}", e, text);
+                } else {
+                    #[cfg(debug_assertions)]
+                    println!("[ai] paste sent via typing fallback");
+                }
+            }
+            Err(e) => {
+                eprintln!("Could not create enigo instance: {}", e);
+                if clipboard_ok {
+                    let _ = app.emit("paste-manual-required", serde_json::json!({ "text": text }));
+                }
             }
         }
     }
@@ -4664,6 +4981,26 @@ fn setup_hotkey(app: &AppHandle, state: SharedState) -> Result<(), String> {
 // ─── App Entry Point ──────────────────────────────────────────────────────────
 
 pub fn run() {
+    // Run the GUI under XWayland on GNOME/Wayland so the voicebar overlay does
+    // not steal keyboard focus from the user's text field: native Wayland gives
+    // an app no reliable way to opt out of focus-on-map, but Mutter honours the
+    // X11 focus hints (focus_on_map/accept_focus) we set on XWayland windows.
+    // (Auto-paste no longer depends on this — it uses /dev/uinput, see
+    // linux_paste_ctrl_v — but keeping the GUI on X11 is what fixes focus.)
+    // Only pin X11 when XWayland (DISPLAY) is available; otherwise stay on
+    // native Wayland. Must run before any GTK initialisation.
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("DISPLAY").is_some() {
+            std::env::set_var("GDK_BACKEND", "x11");
+            std::env::remove_var("WAYLAND_DISPLAY");
+            // Keep the session consistent for any library that checks
+            // XDG_SESSION_TYPE (e.g. clipboard backends) rather than
+            // WAYLAND_DISPLAY.
+            std::env::set_var("XDG_SESSION_TYPE", "x11");
+        }
+    }
+
     let _ = keyring::use_native_store(false);
     let state: SharedState = Arc::new(AppState::new());
 
@@ -4717,6 +5054,7 @@ pub fn run() {
             get_audio_input_info,
             test_microphone,
             set_audio_input_device,
+            set_mic_meter,
             get_completion_sound,
             set_completion_sound,
             get_default_shortcut,
@@ -4774,7 +5112,26 @@ pub fn run() {
             // transparent always-on-top window can intercept onboarding clicks.
             if let Some(win) = app.get_webview_window("voicebar") {
                 let _ = win.set_focusable(false);
+                // On GNOME/Wayland set_focusable (GTK accept-focus) is NOT honoured
+                // when the surface is mapped, so showing the pill on push-to-talk
+                // steals keyboard focus from the field the user is typing into.
+                // Setting focus_on_map(false) on the underlying GTK window fixes
+                // it. This runs on the main thread (setup) and the property
+                // persists across hide/show, so it applies to every show_voicebar.
+                #[cfg(target_os = "linux")]
+                {
+                    use gtk::prelude::GtkWindowExt;
+                    if let Ok(gtk_win) = win.gtk_window() {
+                        gtk_win.set_accept_focus(false);
+                        gtk_win.set_focus_on_map(false);
+                    }
+                }
             }
+
+            // Create the uinput virtual keyboard used for auto-paste on Linux.
+            // Done at startup so the compositor detects it before the first paste.
+            #[cfg(target_os = "linux")]
+            linux_init_virtual_keyboard();
 
             // Log the worker binary path so it's easy to diagnose missing-binary issues.
             let worker = worker_binary_path();

@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import PageHead from "./PageHead";
 import { createShortcutCapture } from "../lib/shortcutCapture";
@@ -254,61 +255,32 @@ export default function Settings({ prefs, setPrefs }: { prefs: Prefs; setPrefs: 
   useEffect(() => {
     if (!micMeterEnabled) {
       setInputLevel(0);
+      invoke("set_mic_meter", { enabled: false }).catch(() => {});
       return;
     }
+    // Native cpal meter: WebKitGTK denies getUserMedia on Linux, so the level
+    // is driven by the `mic-meter-level` event emitted from the Rust side.
     let cancelled = false;
-    let rafId: number | null = null;
-    let stream: MediaStream | null = null;
-    let context: AudioContext | null = null;
+    let unlisten: (() => void) | null = null;
 
-    const startMeter = async () => {
-      if (!navigator.mediaDevices?.getUserMedia) return;
-      try {
-        const list = await navigator.mediaDevices.enumerateDevices();
-        const audioInputs = list.filter((d) => d.kind === "audioinput");
-        const match = audioInputs.find((d) => d.label === selectedMic);
-        const constraints = match
-          ? { audio: { deviceId: { exact: match.deviceId } } }
-          : { audio: true };
-
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-
-        context = new AudioContext();
-        const source = context.createMediaStreamSource(stream);
-        const analyser = context.createAnalyser();
-        analyser.fftSize = 512;
-        analyser.smoothingTimeConstant = 0.82;
-        source.connect(analyser);
-
-        const buf = new Float32Array(analyser.fftSize);
-        const tick = () => {
-          analyser.getFloatTimeDomainData(buf);
-          let sumSq = 0;
-          for (let i = 0; i < buf.length; i += 1) {
-            sumSq += buf[i] * buf[i];
-          }
-          const rms = Math.sqrt(sumSq / buf.length);
-          const level = Math.min(1, rms * 8);
-          setInputLevel((prev) => prev + (level - prev) * 0.28);
-          rafId = window.requestAnimationFrame(tick);
-        };
-        rafId = window.requestAnimationFrame(tick);
-      } catch (e) {
-        console.error(e);
+    void (async () => {
+      unlisten = await listen<number>("mic-meter-level", (event) => {
+        if (cancelled) return;
+        const level = typeof event.payload === "number" ? event.payload : 0;
+        setInputLevel((prev) => prev + (level - prev) * 0.28);
+      });
+      if (cancelled) {
+        unlisten();
+        return;
       }
-    };
-
-    void startMeter();
+      await invoke("set_mic_meter", { enabled: true }).catch((e) => console.error(e));
+    })();
 
     return () => {
       cancelled = true;
-      if (rafId !== null) window.cancelAnimationFrame(rafId);
-      if (stream) stream.getTracks().forEach((t) => t.stop());
-      if (context) void context.close();
+      if (unlisten) unlisten();
+      invoke("set_mic_meter", { enabled: false }).catch(() => {});
+      setInputLevel(0);
     };
   }, [selectedMic, micMeterEnabled]);
 

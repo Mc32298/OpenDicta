@@ -727,39 +727,12 @@ git commit -m "feat(linux): add Linux/Wayland diagnostics card to Settings page"
 
 ---
 
-## Final: Open a PR
+## Final: Push the Linux branch
+
+**Note:** `master` is for Windows releases only. All Linux work stays on `fix-fedora`. Push the branch — do NOT open a PR targeting master.
 
 - [ ] **Push the branch**
 
 ```bash
 git push -u origin fix-fedora
-```
-
-- [ ] **Open the PR**
-
-```bash
-gh pr create \
-  --base master \
-  --title "Linux/Wayland: shortcuts, resize, paste, diagnostics" \
-  --body "$(cat <<'EOF'
-## Summary
-
-- Ships a udev rule in the RPM so global shortcuts work on Wayland without manual group changes
-- Enables OS window decorations on Linux so Settings and Onboarding windows are resizable
-- Adds a graceful paste fallback: when enigo (X11) is unavailable on pure Wayland, shows a "Copied — press Ctrl+V" hint in the VoiceBar
-- Adds a disk space check before model downloads with a human-readable error
-- Adds a Linux/Wayland status card in Settings showing shortcut, paste, and Wayland detection status
-
-## Test plan
-
-- [ ] Install the RPM on Fedora/GNOME Wayland — F8 should trigger recording without any manual setup
-- [ ] Open Settings — window should be resizable by dragging edges
-- [ ] On pure Wayland (no XWayland): trigger a transcription — VoiceBar should show "Copied — press Ctrl+V"
-- [ ] In Settings, the Linux/Wayland status card should show ✓ for evdev and paste
-- [ ] Attempt a model download with a nearly-full disk — should get a clear error message
-- [ ] Verify Windows and macOS builds still compile and behave identically
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-EOF
-)"
 ```

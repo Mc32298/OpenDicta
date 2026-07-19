@@ -10,7 +10,10 @@
     "tauri": "tauri",
     "tauri:dev": "cargo build -p opendicta-worker && npm run tauri -- dev",
     "tauri:dev-cuda": "powershell -File scripts/dev-cuda.ps1",
-    "tauri:build": "cargo build --release -p opendicta-worker && node scripts/copy-worker.mjs && npm run tauri -- build --config src-tauri/tauri.bundle.conf.json"
+    "tauri:build": "node scripts/tauri-build.mjs",
+    "tauri:build:linux": "npm run tauri:build:fedora",
+    "tauri:build:windows": "cargo build --release -p opendicta-worker && node scripts/copy-worker.mjs && npm run tauri -- build --config src-tauri/tauri.bundle.conf.json",
+    "tauri:build:fedora": "cargo build --release -p opendicta-worker && node scripts/copy-worker.mjs && npm run tauri -- build --config src-tauri/tauri.fedora.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
