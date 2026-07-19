@@ -90,7 +90,15 @@ export default function AppShell() {
     <ModelManagerContext.Provider value={modelManager}>
     <div className="stage">
       <div className="win">
-        <div className="titlebar">
+        <div
+          className="titlebar"
+          onMouseDown={(e) => {
+            if (e.button === 0 && !(e.target as HTMLElement).closest(".tl, button")) {
+              e.preventDefault();
+              void getCurrentWindow().startDragging();
+            }
+          }}
+        >
           <div className="tl" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
             <i onClick={() => void getCurrentWindow().hide()} role="button" aria-label="Close" style={{ cursor: "pointer" }} />
             <i onClick={() => void getCurrentWindow().hide()} role="button" aria-label="Minimize" style={{ cursor: "pointer" }} />
