@@ -2621,6 +2621,50 @@ struct VoicebarPosition {
     y: i32,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SettingsWindowSize {
+    width: f64,
+    height: f64,
+}
+
+fn settings_window_size_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Failed to resolve app config dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
+    Ok(dir.join("settings-window-size.json"))
+}
+
+fn save_settings_window_size(app: &AppHandle, width: f64, height: f64) {
+    if let Ok(file) = settings_window_size_path(app) {
+        if let Ok(payload) = serde_json::to_string(&SettingsWindowSize { width, height }) {
+            let _ = std::fs::write(file, payload);
+        }
+    }
+}
+
+fn load_settings_window_size(app: &AppHandle) -> Option<(f64, f64)> {
+    let file = settings_window_size_path(app).ok()?;
+    let text = std::fs::read_to_string(file).ok()?;
+    let size: SettingsWindowSize = serde_json::from_str(&text).ok()?;
+    let (_, _, min_w, min_h) = settings_window_dimensions();
+    Some((size.width.max(min_w).min(4000.0), size.height.max(min_h).min(3000.0)))
+}
+
+fn subscribe_settings_window_resize(app: &AppHandle, win: &tauri::WebviewWindow) {
+    let app_clone = app.clone();
+    let win_clone = win.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Resized(physical_size) = event {
+            if let Ok(scale) = win_clone.scale_factor() {
+                let logical = physical_size.to_logical::<f64>(scale);
+                save_settings_window_size(&app_clone, logical.width, logical.height);
+            }
+        }
+    });
+}
+
 fn voicebar_position_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
@@ -3119,7 +3163,8 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
         Some(p) => format!("/?window=settings&page={}", p),
         None => "/?window=settings".to_string(),
     };
-    let (width, height, min_width, min_height) = settings_window_dimensions();
+    let (default_width, default_height, min_width, min_height) = settings_window_dimensions();
+    let (width, height) = load_settings_window_size(app).unwrap_or((default_width, default_height));
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.set_skip_taskbar(false);
         let _ = win.center();
@@ -3141,7 +3186,9 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
         #[cfg(not(target_os = "linux"))]
         let builder = builder.decorations(false).transparent(true);
 
-        let _ = builder.center().build();
+        if let Ok(win) = builder.center().build() {
+            subscribe_settings_window_resize(app, &win);
+        }
     }
 }
 
@@ -5169,8 +5216,9 @@ pub fn run() {
                     let app_inner = app_settings.clone();
                     let _ = app_settings.run_on_main_thread(move || {
                         if app_inner.get_webview_window("settings").is_none() {
-                            let (width, height, min_width, min_height) = settings_window_dimensions();
-                            let _ = tauri::WebviewWindowBuilder::new(
+                            let (default_width, default_height, min_width, min_height) = settings_window_dimensions();
+                            let (width, height) = load_settings_window_size(&app_inner).unwrap_or((default_width, default_height));
+                            let builder = tauri::WebviewWindowBuilder::new(
                                 &app_inner,
                                 "settings",
                                 tauri::WebviewUrl::App("/?window=settings".into()),
@@ -5179,11 +5227,17 @@ pub fn run() {
                             .inner_size(width, height)
                             .min_inner_size(min_width, min_height)
                             .resizable(true)
-                            .decorations(false)
-                            .transparent(true)
                             .position(-32000.0, -32000.0)
-                            .skip_taskbar(false)
-                            .build();
+                            .skip_taskbar(false);
+
+                            #[cfg(target_os = "linux")]
+                            let builder = builder.decorations(true).transparent(false);
+                            #[cfg(not(target_os = "linux"))]
+                            let builder = builder.decorations(false).transparent(true);
+
+                            if let Ok(win) = builder.build() {
+                                subscribe_settings_window_resize(&app_inner, &win);
+                            }
                         }
                     });
                 });

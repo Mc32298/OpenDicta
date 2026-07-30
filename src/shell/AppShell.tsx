@@ -54,6 +54,8 @@ function getInitialPage(): PageId {
   return PAGE_ALIASES[raw] ?? "dashboard";
 }
 
+const IS_LINUX = navigator.userAgent.includes("Linux");
+
 export default function AppShell() {
   const [prefs, setPrefs] = usePrefs();
   const [page, setPage] = useState<PageId>(getInitialPage);
@@ -90,23 +92,17 @@ export default function AppShell() {
     <ModelManagerContext.Provider value={modelManager}>
     <div className="stage">
       <div className="win">
-        <div
-          className="titlebar"
-          onMouseDown={(e) => {
-            if (e.button === 0 && !(e.target as HTMLElement).closest(".tl, button")) {
-              e.preventDefault();
-              void getCurrentWindow().startDragging();
-            }
-          }}
-        >
-          <div className="tl" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
-            <i onClick={() => void getCurrentWindow().hide()} role="button" aria-label="Close" style={{ cursor: "pointer" }} />
-            <i onClick={() => void getCurrentWindow().hide()} role="button" aria-label="Minimize" style={{ cursor: "pointer" }} />
-            <i aria-disabled />
+        {!IS_LINUX && (
+          <div className="titlebar" data-tauri-drag-region>
+            <div className="tl" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+              <i onClick={() => void getCurrentWindow().hide()} role="button" aria-label="Close" style={{ cursor: "pointer" }} />
+              <i onClick={() => void getCurrentWindow().hide()} role="button" aria-label="Minimize" style={{ cursor: "pointer" }} />
+              <i aria-disabled />
+            </div>
+            <div className="title">OpenDicta — {current.label}</div>
+            <div style={{ width: 54 }} />
           </div>
-          <div className="title">OpenDicta — {current.label}</div>
-          <div style={{ width: 54 }} />
-        </div>
+        )}
 
         <div className="app">
           <aside className="side">

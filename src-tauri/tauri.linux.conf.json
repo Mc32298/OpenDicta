@@ -1,0 +1,15 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "rpm"],
+    "createUpdaterArtifacts": false,
+    "externalBin": ["binaries/opendicta-worker"],
+    "linux": {
+      "rpm": {
+        "files": {
+          "/etc/udev/rules.d/99-opendicta.rules": "../packaging/99-opendicta.rules"
+        }
+      }
+    }
+  }
+}
