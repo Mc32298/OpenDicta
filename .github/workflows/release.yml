@@ -26,6 +26,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
+            libasound2-dev \
             rpm \
             squashfs-tools \
             libfuse2
