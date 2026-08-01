@@ -32,7 +32,32 @@ OpenDicta is a free, open-source speech-to-text app built with Tauri and Rust. I
 - Node.js / npm
 - Tauri CLI
 
-*(Installation instructions and build commands will be added upon the v1.0 release)*
+### Fedora Workstation
+
+Install the native packages Tauri and OpenDicta need for WebKitGTK, tray integration, synthetic paste, audio capture, and RPM packaging:
+
+```sh
+sudo dnf install webkit2gtk4.1-devel openssl-devel curl wget file libappindicator-gtk3-devel librsvg2-devel libxdo-devel alsa-lib-devel nodejs npm
+sudo dnf group install "c-development"
+```
+
+Build and run the app locally:
+
+```sh
+npm ci
+cargo build -p opendicta-worker
+npm run tauri:dev
+```
+
+Build the Fedora RPM package:
+
+```sh
+npm run tauri:build:fedora
+```
+
+On Linux, `npm run tauri:build` now routes to the Fedora bundle config automatically.
+
+The RPM is written under `src-tauri/target/release/bundle/rpm`. Fedora Workstation's default GNOME Wayland session is supported as the primary Linux target, but compositor policy can affect global shortcuts and synthetic paste. If a shortcut cannot be registered or paste is blocked, choose another binding in Settings or test under an X11 session as a fallback.
 
 ## 🧠 Optional AI Configuration
 

@@ -1,0 +1,4 @@
+# OpenDicta: allow members of the input group to use /dev/uinput
+# This is required for the auto-paste feature.
+# After installing, log out and back in (or run: newgrp input).
+KERNEL=="uinput", MODE="0660", GROUP="input", TAG+="uaccess"

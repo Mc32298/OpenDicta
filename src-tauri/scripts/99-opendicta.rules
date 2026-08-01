@@ -1,0 +1,9 @@
+# Grant the currently logged-in seat user read access to raw keyboard input.
+# Required for global shortcuts on Wayland (evdev-based listener).
+# Uses systemd-logind uaccess tag — no group membership or re-login needed.
+KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess"
+
+# Grant the seat user access to /dev/uinput so OpenDicta can create a virtual
+# keyboard for auto-paste (Ctrl+V) without going through the GNOME/Wayland
+# RemoteDesktop portal (which would prompt on every launch).
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

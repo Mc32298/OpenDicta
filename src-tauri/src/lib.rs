@@ -32,7 +32,10 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+#[cfg(target_os = "windows")]
 const DEFAULT_SHORTCUT: &str = "Ctrl+-";
+#[cfg(not(target_os = "windows"))]
+const DEFAULT_SHORTCUT: &str = "F8";
 const DEFAULT_PUSH_TO_TALK_SHORTCUT: &str = "F6";
 const DEFAULT_STOP_DISCARD_SHORTCUT: &str = "Esc";
 const DEFAULT_REFINE_AI_SHORTCUT: &str = "Ctrl+Shift+R";
@@ -69,6 +72,287 @@ fn native_vk_code(hotkey: &str) -> Option<i32> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn native_linux_key_code(hotkey: &str) -> Option<evdev::Key> {
+    match hotkey {
+        "ControlRight" => Some(evdev::Key::KEY_RIGHTCTRL),
+        "ControlLeft"  => Some(evdev::Key::KEY_LEFTCTRL),
+        "ShiftRight"   => Some(evdev::Key::KEY_RIGHTSHIFT),
+        "ShiftLeft"    => Some(evdev::Key::KEY_LEFTSHIFT),
+        "AltRight"     => Some(evdev::Key::KEY_RIGHTALT),
+        "AltLeft"      => Some(evdev::Key::KEY_LEFTALT),
+        "MetaRight"    => Some(evdev::Key::KEY_RIGHTMETA),
+        "MetaLeft"     => Some(evdev::Key::KEY_LEFTMETA),
+        "CapsLock"     => Some(evdev::Key::KEY_CAPSLOCK),
+        _              => None,
+    }
+}
+
+// ─── Linux evdev shortcut engine ─────────────────────────────────────────────
+//
+// Tauri's global_shortcut plugin uses X11 internally and does not work on
+// native Wayland sessions.  We replace it entirely on Linux with a blocking
+// evdev reader: one thread per keyboard device reads raw key events and
+// matches them against the active shortcut list.
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct LinuxEvdevShortcut {
+    raw: String,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    meta: bool,
+    trigger: LinuxEvdevTrigger,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+enum LinuxEvdevTrigger {
+    BareModifier(evdev::Key), // e.g. "ControlRight" — fires on press/release of that modifier
+    Key(evdev::Key),          // e.g. "Ctrl+-" — fires when trigger key pressed with required mods
+}
+
+#[cfg(target_os = "linux")]
+static EVDEV_SHORTCUTS: std::sync::OnceLock<Arc<Mutex<Vec<LinuxEvdevShortcut>>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+static EVDEV_INIT_ERROR: std::sync::OnceLock<Option<String>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+static EVDEV_INIT_DONE: std::sync::OnceLock<bool> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn evdev_shortcuts() -> Arc<Mutex<Vec<LinuxEvdevShortcut>>> {
+    EVDEV_SHORTCUTS
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .clone()
+}
+
+#[cfg(target_os = "linux")]
+fn base_str_to_evdev_key(s: &str) -> Option<evdev::Key> {
+    use evdev::Key;
+    match s {
+        "A" => Some(Key::KEY_A), "B" => Some(Key::KEY_B), "C" => Some(Key::KEY_C),
+        "D" => Some(Key::KEY_D), "E" => Some(Key::KEY_E), "F" => Some(Key::KEY_F),
+        "G" => Some(Key::KEY_G), "H" => Some(Key::KEY_H), "I" => Some(Key::KEY_I),
+        "J" => Some(Key::KEY_J), "K" => Some(Key::KEY_K), "L" => Some(Key::KEY_L),
+        "M" => Some(Key::KEY_M), "N" => Some(Key::KEY_N), "O" => Some(Key::KEY_O),
+        "P" => Some(Key::KEY_P), "Q" => Some(Key::KEY_Q), "R" => Some(Key::KEY_R),
+        "S" => Some(Key::KEY_S), "T" => Some(Key::KEY_T), "U" => Some(Key::KEY_U),
+        "V" => Some(Key::KEY_V), "W" => Some(Key::KEY_W), "X" => Some(Key::KEY_X),
+        "Y" => Some(Key::KEY_Y), "Z" => Some(Key::KEY_Z),
+        "0" => Some(Key::KEY_0), "1" => Some(Key::KEY_1), "2" => Some(Key::KEY_2),
+        "3" => Some(Key::KEY_3), "4" => Some(Key::KEY_4), "5" => Some(Key::KEY_5),
+        "6" => Some(Key::KEY_6), "7" => Some(Key::KEY_7), "8" => Some(Key::KEY_8),
+        "9" => Some(Key::KEY_9),
+        "F1"  => Some(Key::KEY_F1),  "F2"  => Some(Key::KEY_F2),
+        "F3"  => Some(Key::KEY_F3),  "F4"  => Some(Key::KEY_F4),
+        "F5"  => Some(Key::KEY_F5),  "F6"  => Some(Key::KEY_F6),
+        "F7"  => Some(Key::KEY_F7),  "F8"  => Some(Key::KEY_F8),
+        "F9"  => Some(Key::KEY_F9),  "F10" => Some(Key::KEY_F10),
+        "F11" => Some(Key::KEY_F11), "F12" => Some(Key::KEY_F12),
+        "-"   => Some(Key::KEY_MINUS),       "="  => Some(Key::KEY_EQUAL),
+        "["   => Some(Key::KEY_LEFTBRACE),   "]"  => Some(Key::KEY_RIGHTBRACE),
+        "\\"  => Some(Key::KEY_BACKSLASH),   ";"  => Some(Key::KEY_SEMICOLON),
+        "'"   => Some(Key::KEY_APOSTROPHE),  ","  => Some(Key::KEY_COMMA),
+        "."   => Some(Key::KEY_DOT),         "/"  => Some(Key::KEY_SLASH),
+        "`"   => Some(Key::KEY_GRAVE),
+        "Space"    => Some(Key::KEY_SPACE),    "Enter"    => Some(Key::KEY_ENTER),
+        "Esc"      => Some(Key::KEY_ESC),      "Backspace"=> Some(Key::KEY_BACKSPACE),
+        "Tab"      => Some(Key::KEY_TAB),      "Up"       => Some(Key::KEY_UP),
+        "Down"     => Some(Key::KEY_DOWN),     "Left"     => Some(Key::KEY_LEFT),
+        "Right"    => Some(Key::KEY_RIGHT),    "Insert"   => Some(Key::KEY_INSERT),
+        "Delete"   => Some(Key::KEY_DELETE),   "Home"     => Some(Key::KEY_HOME),
+        "End"      => Some(Key::KEY_END),      "PageUp"   => Some(Key::KEY_PAGEUP),
+        "PageDown" => Some(Key::KEY_PAGEDOWN),
+        "NumpadAdd"      => Some(Key::KEY_KPPLUS),
+        "NumpadSubtract" => Some(Key::KEY_KPMINUS),
+        "NumpadMultiply" => Some(Key::KEY_KPASTERISK),
+        "NumpadDivide"   => Some(Key::KEY_KPSLASH),
+        "NumpadDecimal"  => Some(Key::KEY_KPDOT),
+        "Numpad0" => Some(Key::KEY_KP0), "Numpad1" => Some(Key::KEY_KP1),
+        "Numpad2" => Some(Key::KEY_KP2), "Numpad3" => Some(Key::KEY_KP3),
+        "Numpad4" => Some(Key::KEY_KP4), "Numpad5" => Some(Key::KEY_KP5),
+        "Numpad6" => Some(Key::KEY_KP6), "Numpad7" => Some(Key::KEY_KP7),
+        "Numpad8" => Some(Key::KEY_KP8), "Numpad9" => Some(Key::KEY_KP9),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_shortcut(hotkey: &str) -> Option<LinuxEvdevShortcut> {
+    // Bare modifier keys ("ControlRight", "ShiftLeft", …)
+    if let Some(key) = native_linux_key_code(hotkey) {
+        return Some(LinuxEvdevShortcut {
+            raw: hotkey.to_string(),
+            ctrl: false, shift: false, alt: false, meta: false,
+            trigger: LinuxEvdevTrigger::BareModifier(key),
+        });
+    }
+    // Combo or single key — split on '+', last non-modifier token is the trigger
+    let mut ctrl = false;
+    let mut shift = false;
+    let mut alt = false;
+    let mut meta = false;
+    let mut trigger_key: Option<evdev::Key> = None;
+    for part in hotkey.split('+') {
+        match part {
+            "Ctrl"  => ctrl  = true,
+            "Shift" => shift = true,
+            "Alt"   => alt   = true,
+            "Super" => meta  = true,
+            other   => trigger_key = base_str_to_evdev_key(other),
+        }
+    }
+    Some(LinuxEvdevShortcut {
+        raw: hotkey.to_string(),
+        ctrl, shift, alt, meta,
+        trigger: LinuxEvdevTrigger::Key(trigger_key?),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn start_evdev_threads(app: AppHandle, state: SharedState) -> Result<(), String> {
+    // Idempotent: only start once per process lifetime
+    if state.right_ctrl_active.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    state.right_ctrl_stop.store(false, Ordering::SeqCst);
+
+    let keyboard_paths: Vec<std::path::PathBuf> = evdev::enumerate()
+        .filter_map(|(path, dev)| {
+            // Any device with full letter keys is a keyboard
+            if dev.supported_keys().map_or(false, |k| k.contains(evdev::Key::KEY_A)) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if keyboard_paths.is_empty() {
+        state.right_ctrl_active.store(false, Ordering::SeqCst);
+        let msg = "No keyboard input devices found. \
+                   The OpenDicta udev rule may not be active yet. \
+                   Try reinstalling or run: sudo udevadm trigger --subsystem-match=input"
+            .to_string();
+        let _ = EVDEV_INIT_ERROR.set(Some(msg.clone()));
+        let _ = EVDEV_INIT_DONE.set(true);
+        return Err(msg);
+    }
+
+    // Verify we can actually open a keyboard device (permission check).
+    if let Some(first_path) = keyboard_paths.first() {
+        if let Err(e) = evdev::Device::open(first_path) {
+            state.right_ctrl_active.store(false, Ordering::SeqCst);
+            let msg = format!(
+                "Cannot read keyboard input ({}). \
+                 The udev rule may not have taken effect yet — \
+                 try logging out and back in.",
+                e
+            );
+            let _ = EVDEV_INIT_ERROR.set(Some(msg.clone()));
+            let _ = EVDEV_INIT_DONE.set(true);
+            return Err(msg);
+        }
+    }
+
+    let _ = EVDEV_INIT_ERROR.set(None);
+
+    for path in keyboard_paths {
+        let stop       = state.right_ctrl_stop.clone();
+        let app_clone  = app.clone();
+        let state_clone = state.clone();
+        let shortcuts  = evdev_shortcuts();
+
+        std::thread::spawn(move || {
+            let mut device = match evdev::Device::open(&path) {
+                Ok(d)  => d,
+                Err(_) => return,
+            };
+
+            // Per-device modifier state
+            let mut ctrl_held  = false;
+            let mut shift_held = false;
+            let mut alt_held   = false;
+            let mut meta_held  = false;
+            // Track which shortcut raws are currently "down" so we can fire release
+            let mut active: Vec<String> = Vec::new();
+
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                match device.fetch_events() {
+                    Ok(events) => {
+                        for event in events {
+                            if stop.load(Ordering::SeqCst) { return; }
+                            if event.event_type() != evdev::EventType::KEY { continue; }
+
+                            let key   = evdev::Key(event.code());
+                            let value = event.value(); // 0=up 1=down 2=repeat
+
+                            // Update modifier tracking
+                            if key == evdev::Key::KEY_LEFTCTRL || key == evdev::Key::KEY_RIGHTCTRL {
+                                ctrl_held  = value != 0;
+                            } else if key == evdev::Key::KEY_LEFTSHIFT || key == evdev::Key::KEY_RIGHTSHIFT {
+                                shift_held = value != 0;
+                            } else if key == evdev::Key::KEY_LEFTALT || key == evdev::Key::KEY_RIGHTALT {
+                                alt_held   = value != 0;
+                            } else if key == evdev::Key::KEY_LEFTMETA || key == evdev::Key::KEY_RIGHTMETA {
+                                meta_held  = value != 0;
+                            }
+
+                            if value == 2 { continue; } // ignore auto-repeat
+
+                            let hk_list = shortcuts.lock().unwrap().clone();
+                            for sc in &hk_list {
+                                match &sc.trigger {
+                                    LinuxEvdevTrigger::BareModifier(mod_key) => {
+                                        if key == *mod_key {
+                                            if value == 1 && !active.contains(&sc.raw) {
+                                                active.push(sc.raw.clone());
+                                                handle_shortcut_pressed(app_clone.clone(), state_clone.clone(), sc.raw.clone());
+                                            } else if value == 0 {
+                                                active.retain(|s| s != &sc.raw);
+                                                handle_shortcut_released(app_clone.clone(), state_clone.clone(), sc.raw.clone());
+                                            }
+                                        }
+                                    }
+                                    LinuxEvdevTrigger::Key(trigger_key) => {
+                                        if key == *trigger_key {
+                                            let mods_match = sc.ctrl  == ctrl_held
+                                                && sc.shift == shift_held
+                                                && sc.alt   == alt_held
+                                                && sc.meta  == meta_held;
+                                            if value == 1 && mods_match && !active.contains(&sc.raw) {
+                                                active.push(sc.raw.clone());
+                                                handle_shortcut_pressed(app_clone.clone(), state_clone.clone(), sc.raw.clone());
+                                            } else if value == 0 && active.contains(&sc.raw) {
+                                                active.retain(|s| s != &sc.raw);
+                                                handle_shortcut_released(app_clone.clone(), state_clone.clone(), sc.raw.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => break, // device disconnected
+                }
+            }
+        });
+    }
+
+    let _ = EVDEV_INIT_DONE.set(true);
+
+    Ok(())
+}
+
 fn is_modifier_only_shortcut(hotkey: &str) -> bool {
     matches!(
         hotkey,
@@ -81,6 +365,36 @@ fn is_modifier_only_shortcut(hotkey: &str) -> bool {
             | "MetaLeft"
             | "MetaRight"
     )
+}
+
+fn platform_supports_modifier_only_shortcuts() -> bool {
+    cfg!(any(target_os = "windows", target_os = "linux"))
+}
+
+fn shortcut_supported_on_this_platform(hotkey: &str) -> bool {
+    !is_modifier_only_shortcut(hotkey) || platform_supports_modifier_only_shortcuts()
+}
+
+fn unsupported_shortcut_message(hotkey: &str) -> String {
+    if is_modifier_only_shortcut(hotkey) && !platform_supports_modifier_only_shortcuts() {
+        return format!(
+            "Shortcut '{}' is not supported on Linux. Use a combo such as '{}' instead.",
+            hotkey, DEFAULT_SHORTCUT
+        );
+    }
+    format!("Shortcut '{}' could not be activated on this system", hotkey)
+}
+
+fn should_migrate_legacy_linux_main_shortcut(hotkey: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = hotkey;
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        matches!(hotkey, "Ctrl+-")
+    }
 }
 
 // ─── App State ────────────────────────────────────────────────────────────────
@@ -1137,7 +1451,7 @@ async fn start_tutorial(app: AppHandle) -> Result<(), String> {
         let _ = win.set_focus();
         let _ = win.emit("start-tutorial", ());
     } else {
-        tauri::WebviewWindowBuilder::new(
+        let builder = tauri::WebviewWindowBuilder::new(
             &app,
             "onboarding",
             tauri::WebviewUrl::App("/?window=onboarding&phase=tour".into()),
@@ -1145,11 +1459,14 @@ async fn start_tutorial(app: AppHandle) -> Result<(), String> {
         .title("OpenDicta")
         .inner_size(820.0, 660.0)
         .resizable(false)
-        .decorations(false)
-        .transparent(false)
-        .center()
-        .build()
-        .map_err(|e| e.to_string())?;
+        .transparent(false);
+
+        #[cfg(target_os = "linux")]
+        let builder = builder.decorations(true);
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.decorations(false);
+
+        builder.center().build().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1208,6 +1525,9 @@ async fn set_shortcut_binding(
     if let Some(ref s) = next {
         if s.len() > 64 {
             return Err("Shortcut too long".to_string());
+        }
+        if !shortcut_supported_on_this_platform(s) {
+            return Err(unsupported_shortcut_message(s));
         }
         let main_shortcut = state.shortcut.lock().unwrap().clone();
         if s == &main_shortcut {
@@ -1637,6 +1957,30 @@ async fn download_model(
     let bases = download_bases_for(&model_id);
     let total_files = specs.len();
 
+    // Check available disk space before starting (Unix only).
+    // Sum bytes of files not already verified; require 10% headroom.
+    #[cfg(unix)]
+    {
+        let needed: u64 = specs
+            .iter()
+            .filter(|s| !dir.join(s.name).exists())
+            .map(|s| s.expected_bytes)
+            .sum();
+        if needed > 0 {
+            if let Some(available) = available_disk_space_bytes(&dir) {
+                let required = (needed as f64 * 1.1) as u64;
+                if available < required {
+                    let needed_gb = required as f64 / 1_073_741_824.0;
+                    let avail_gb = available as f64 / 1_073_741_824.0;
+                    return Err(format!(
+                        "Not enough disk space. Need {:.1} GB, only {:.1} GB available.",
+                        needed_gb, avail_gb
+                    ));
+                }
+            }
+        }
+    }
+
     use futures_util::StreamExt;
 
     for (idx, spec) in specs.iter().enumerate() {
@@ -1807,6 +2151,9 @@ async fn set_shortcut(
     if shortcut.len() > 64 {
         return Err("Shortcut string is too long".to_string());
     }
+    if !shortcut_supported_on_this_platform(shortcut.as_str()) {
+        return Err(unsupported_shortcut_message(shortcut.as_str()));
+    }
     if state.shortcut_push_to_talk.lock().unwrap().as_deref() == Some(shortcut.as_str())
         || state.shortcut_stop_discard.lock().unwrap().as_deref() == Some(shortcut.as_str())
         || state.shortcut_refine_ai.lock().unwrap().as_deref() == Some(shortcut.as_str())
@@ -1867,6 +2214,138 @@ async fn reset_voicebar_position(
     Ok(())
 }
 
+/// Human-readable name for a cpal input device, or None if unavailable.
+fn cpal_device_name(d: &cpal::Device) -> Option<String> {
+    use cpal::traits::DeviceTrait;
+    d.description().map(|desc| desc.name().to_string()).ok()
+}
+
+/// ALSA/PipeWire exposes a "null" sink that opens successfully but only ever
+/// produces silence. Never auto-select it.
+#[cfg(target_os = "linux")]
+fn is_null_input(name: &str) -> bool {
+    name.contains("Discard all samples") || name.eq_ignore_ascii_case("null")
+}
+
+/// Prove a device actually works by building + starting a real f32 capture
+/// stream (the app captures f32 everywhere). On PipeWire systems ALSA's
+/// "default" PCM enumerates fine but fails `snd_pcm_hw_params` with EINVAL at
+/// stream-open time, so config-only checks are not enough — we must try to open.
+#[cfg(target_os = "linux")]
+fn input_device_opens(device: &cpal::Device) -> bool {
+    use cpal::traits::{DeviceTrait, StreamTrait};
+    let cfg = match device.default_input_config() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // The broken ALSA "default" device reports a bogus sample rate (u32::MAX).
+    let sr = cfg.sample_rate();
+    if sr == 0 || sr > 384_000 {
+        return false;
+    }
+    match device.build_input_stream(
+        &cfg.into(),
+        |_d: &[f32], _: &_| {},
+        |_e| {},
+        Some(std::time::Duration::from_millis(200)),
+    ) {
+        Ok(s) => s.play().is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Choose an input device that can actually be opened.
+///
+/// On Linux/PipeWire the saved preference or the ALSA "default" device is
+/// frequently unopenable, so we walk an ordered candidate list — saved
+/// preference, then the PipeWire/Pulse PCMs (which route to the user's
+/// system-selected source and reliably open), then the system default, then any
+/// other device — and return the first whose stream truly builds, skipping the
+/// silent "null" device.
+///
+/// On Windows/macOS behaviour is unchanged: honour the saved preference if it
+/// exists, otherwise the system default.
+#[cfg(target_os = "linux")]
+fn select_input_device(host: &cpal::Host, preferred: &Option<String>) -> Option<cpal::Device> {
+    use cpal::traits::HostTrait;
+    let mut candidates: Vec<cpal::Device> = Vec::new();
+
+    if let Some(name) = preferred {
+        if let Ok(iter) = host.input_devices() {
+            for d in iter {
+                if cpal_device_name(&d).as_deref() == Some(name.as_str()) {
+                    candidates.push(d);
+                }
+            }
+        }
+    }
+    if let Ok(iter) = host.input_devices() {
+        let mut pw = Vec::new();
+        let mut pulse = Vec::new();
+        for d in iter {
+            let n = cpal_device_name(&d).unwrap_or_default();
+            if n.contains("PipeWire") {
+                pw.push(d);
+            } else if n.eq_ignore_ascii_case("pulse") || n.contains("PulseAudio") {
+                pulse.push(d);
+            }
+        }
+        candidates.extend(pw);
+        candidates.extend(pulse);
+    }
+    if let Some(d) = host.default_input_device() {
+        candidates.push(d);
+    }
+    if let Ok(iter) = host.input_devices() {
+        for d in iter {
+            candidates.push(d);
+        }
+    }
+
+    for d in candidates {
+        let n = cpal_device_name(&d).unwrap_or_default();
+        if is_null_input(&n) {
+            continue;
+        }
+        if input_device_opens(&d) {
+            return Some(d);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn select_input_device(host: &cpal::Host, preferred: &Option<String>) -> Option<cpal::Device> {
+    use cpal::traits::HostTrait;
+    if let Some(name) = preferred {
+        if let Ok(iter) = host.input_devices() {
+            if let Some(d) = iter
+                .into_iter()
+                .find(|d| cpal_device_name(d).as_deref() == Some(name.as_str()))
+            {
+                return Some(d);
+            }
+        }
+    }
+    host.default_input_device()
+}
+
+/// Platform-appropriate "no mic" message for the transcription-error event.
+fn no_microphone_message() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "No microphone found. Check System Settings → Privacy & Security → Microphone.".to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "No usable microphone found. Make sure a microphone is connected and PipeWire/PulseAudio is running.".to_string()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        "No microphone found. Make sure a microphone is connected and enabled.".to_string()
+    }
+}
+
 #[derive(serde::Serialize)]
 struct AudioInputInfo {
     default_device: Option<String>,
@@ -1883,11 +2362,18 @@ async fn get_audio_input_info(
 
     let default_device = host.default_input_device().and_then(|d| d.description().map(|desc| desc.name().to_string()).ok());
 
+    // ALSA/PipeWire often exposes the same physical mic under several config
+    // nodes that share one description name (e.g. hw: vs plughw:). De-duplicate
+    // by name — otherwise the frontend <select> gets colliding keys/values and
+    // React silently drops entries, making a working mic look "unrecognised".
     let mut devices = Vec::new();
     if let Ok(iter) = host.input_devices() {
         for d in iter {
             if let Ok(desc) = d.description() {
-                devices.push(desc.name().to_string());
+                let name = desc.name().to_string();
+                if !devices.contains(&name) {
+                    devices.push(name);
+                }
             }
         }
     }
@@ -1909,25 +2395,16 @@ struct MicrophoneTestResult {
 async fn test_microphone(
     state: tauri::State<'_, SharedState>,
 ) -> Result<MicrophoneTestResult, String> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use cpal::traits::{DeviceTrait, StreamTrait};
     let host = cpal::default_host();
     let preferred_name = state.mic_device.lock().unwrap().clone();
 
-    let device = if let Some(ref name) = preferred_name {
-        host.input_devices()
-            .ok()
-            .and_then(|mut iter| iter.find(|d| d.description().map(|desc| desc.name().to_string()).ok().as_deref() == Some(name)))
-            .or_else(|| host.default_input_device())
-    } else {
-        host.default_input_device()
-    };
-
-    let device = match device {
+    let device = match select_input_device(&host, &preferred_name) {
         Some(d) => d,
         None => {
             return Ok(MicrophoneTestResult {
                 ok: false,
-                message: "No input device found.".to_string(),
+                message: "No usable input device found.".to_string(),
             })
         }
     };
@@ -2004,6 +2481,105 @@ async fn set_audio_input_device(
     Ok(())
 }
 
+/// Shared stop flag for the live mic-preview meter.
+fn mic_meter_stop() -> Arc<AtomicBool> {
+    static S: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+    S.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
+}
+
+/// Start/stop a native mic level meter that emits `mic-meter-level` (0.0–1.0).
+///
+/// Uses cpal (via `select_input_device`) rather than the webview's WebRTC
+/// `getUserMedia`, which WebKitGTK denies by default on Linux. Preview only —
+/// the recording pipeline is untouched.
+#[tauri::command]
+async fn set_mic_meter(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let stop = mic_meter_stop();
+    if !enabled {
+        stop.store(true, Ordering::SeqCst);
+        return Ok(());
+    }
+    // Restarting: signal any prior meter thread to exit, then claim a fresh run.
+    stop.store(true, Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    stop.store(false, Ordering::SeqCst);
+
+    let preferred = state.mic_device.lock().unwrap().clone();
+    let stop_thread = stop.clone();
+
+    std::thread::spawn(move || {
+        use cpal::traits::{DeviceTrait, StreamTrait};
+        let host = cpal::default_host();
+        let device = match select_input_device(&host, &preferred) {
+            Some(d) => d,
+            None => {
+                let _ = app.emit("mic-meter-level", 0.0f32);
+                return;
+            }
+        };
+        let cfg = match device.default_input_config() {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = app.emit("mic-meter-level", 0.0f32);
+                return;
+            }
+        };
+        let channels = cfg.channels() as usize;
+        let stream_cfg: cpal::StreamConfig = cfg.into();
+        let app_cb = app.clone();
+        let mut last_ms = 0u64;
+
+        let stream = device.build_input_stream(
+            &stream_cfg,
+            move |data: &[f32], _: &_| {
+                if channels == 0 {
+                    return;
+                }
+                let mut sum_sq = 0.0f32;
+                let mut count = 0usize;
+                for frame in data.chunks(channels) {
+                    let mono = frame.iter().sum::<f32>() / channels as f32;
+                    sum_sq += mono * mono;
+                    count += 1;
+                }
+                if count > 0 {
+                    let rms = (sum_sq / count as f32).sqrt();
+                    let level = (rms * 8.0).clamp(0.0, 1.0);
+                    let now = now_millis();
+                    if now.saturating_sub(last_ms) >= 33 {
+                        last_ms = now;
+                        let _ = app_cb.emit("mic-meter-level", level);
+                    }
+                }
+            },
+            |_e| {},
+            None,
+        );
+        let stream = match stream {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = app.emit("mic-meter-level", 0.0f32);
+                return;
+            }
+        };
+        if stream.play().is_err() {
+            let _ = app.emit("mic-meter-level", 0.0f32);
+            return;
+        }
+        while !stop_thread.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        drop(stream);
+        let _ = app.emit("mic-meter-level", 0.0f32);
+    });
+
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_completion_sound(state: tauri::State<'_, SharedState>) -> Result<bool, String> {
     Ok(state.completion_sound.load(Ordering::SeqCst))
@@ -2043,6 +2619,50 @@ async fn set_debug_mic_level(
 struct VoicebarPosition {
     x: i32,
     y: i32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SettingsWindowSize {
+    width: f64,
+    height: f64,
+}
+
+fn settings_window_size_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Failed to resolve app config dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
+    Ok(dir.join("settings-window-size.json"))
+}
+
+fn save_settings_window_size(app: &AppHandle, width: f64, height: f64) {
+    if let Ok(file) = settings_window_size_path(app) {
+        if let Ok(payload) = serde_json::to_string(&SettingsWindowSize { width, height }) {
+            let _ = std::fs::write(file, payload);
+        }
+    }
+}
+
+fn load_settings_window_size(app: &AppHandle) -> Option<(f64, f64)> {
+    let file = settings_window_size_path(app).ok()?;
+    let text = std::fs::read_to_string(file).ok()?;
+    let size: SettingsWindowSize = serde_json::from_str(&text).ok()?;
+    let (_, _, min_w, min_h) = settings_window_dimensions();
+    Some((size.width.max(min_w).min(4000.0), size.height.max(min_h).min(3000.0)))
+}
+
+fn subscribe_settings_window_resize(app: &AppHandle, win: &tauri::WebviewWindow) {
+    let app_clone = app.clone();
+    let win_clone = win.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Resized(physical_size) = event {
+            if let Ok(scale) = win_clone.scale_factor() {
+                let logical = physical_size.to_logical::<f64>(scale);
+                save_settings_window_size(&app_clone, logical.width, logical.height);
+            }
+        }
+    });
 }
 
 fn voicebar_position_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -2185,26 +2805,39 @@ fn load_app_settings(app: &AppHandle, state: SharedState) {
     let Ok(settings) = serde_json::from_str::<AppSettings>(&text) else {
         return;
     };
-    *state.shortcut.lock().unwrap() = settings.shortcut;
+    *state.shortcut.lock().unwrap() = if settings.shortcut.trim().is_empty()
+        || !shortcut_supported_on_this_platform(settings.shortcut.trim())
+        || should_migrate_legacy_linux_main_shortcut(settings.shortcut.trim())
+    {
+        DEFAULT_SHORTCUT.to_string()
+    } else {
+        settings.shortcut
+    };
     *state.shortcut_push_to_talk.lock().unwrap() = if settings.shortcut_push_to_talk.trim().is_empty() {
         None
+    } else if !shortcut_supported_on_this_platform(settings.shortcut_push_to_talk.trim()) {
+        Some(DEFAULT_PUSH_TO_TALK_SHORTCUT.to_string())
     } else {
         Some(settings.shortcut_push_to_talk)
     };
     *state.shortcut_stop_discard.lock().unwrap() = if settings.shortcut_stop_discard.trim().is_empty() {
         None
+    } else if !shortcut_supported_on_this_platform(settings.shortcut_stop_discard.trim()) {
+        Some(DEFAULT_STOP_DISCARD_SHORTCUT.to_string())
     } else {
         Some(settings.shortcut_stop_discard)
     };
     *state.shortcut_refine_ai.lock().unwrap() = if settings.shortcut_refine_ai.trim().is_empty() {
         None
+    } else if !shortcut_supported_on_this_platform(settings.shortcut_refine_ai.trim()) {
+        Some(DEFAULT_REFINE_AI_SHORTCUT.to_string())
     } else {
         Some(settings.shortcut_refine_ai)
     };
     *state.shortcut_quick_switcher.lock().unwrap() =
         if settings.shortcut_quick_switcher.trim().is_empty() {
             None
-        } else if is_modifier_only_shortcut(settings.shortcut_quick_switcher.trim()) {
+        } else if !shortcut_supported_on_this_platform(settings.shortcut_quick_switcher.trim()) {
             Some(DEFAULT_QUICK_SWITCHER_SHORTCUT.to_string())
         } else {
             Some(settings.shortcut_quick_switcher)
@@ -2500,7 +3133,7 @@ fn open_onboarding(app: &AppHandle) {
         let _ = win.show();
         let _ = win.set_focus();
     } else {
-        let _ = tauri::WebviewWindowBuilder::new(
+        let builder = tauri::WebviewWindowBuilder::new(
             app,
             "onboarding",
             tauri::WebviewUrl::App("/?window=onboarding".into()),
@@ -2508,10 +3141,14 @@ fn open_onboarding(app: &AppHandle) {
         .title("OpenDicta Setup")
         .inner_size(760.0, 620.0)
         .resizable(false)
-        .decorations(false)
-        .transparent(false)
-        .center()
-        .build();
+        .transparent(false);
+
+        #[cfg(target_os = "linux")]
+        let builder = builder.decorations(true);
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.decorations(false);
+
+        let _ = builder.center().build();
     }
 }
 
@@ -2526,7 +3163,8 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
         Some(p) => format!("/?window=settings&page={}", p),
         None => "/?window=settings".to_string(),
     };
-    let (width, height, min_width, min_height) = settings_window_dimensions();
+    let (default_width, default_height, min_width, min_height) = settings_window_dimensions();
+    let (width, height) = load_settings_window_size(app).unwrap_or((default_width, default_height));
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.set_skip_taskbar(false);
         let _ = win.center();
@@ -2536,16 +3174,21 @@ fn open_settings_page(app: &AppHandle, page: Option<&str>) {
             let _ = win.emit("navigate-to-page", p);
         }
     } else {
-        let _ =
+        let builder =
             tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App(url.into()))
                 .title("OpenDicta")
                 .inner_size(width, height)
                 .min_inner_size(min_width, min_height)
-                .resizable(true)
-                .decorations(false)
-                .transparent(true)
-                .center()
-                .build();
+                .resizable(true);
+
+        #[cfg(target_os = "linux")]
+        let builder = builder.decorations(true).transparent(false);
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.decorations(false).transparent(true);
+
+        if let Ok(win) = builder.center().build() {
+            subscribe_settings_window_resize(app, &win);
+        }
     }
 }
 
@@ -2627,24 +3270,19 @@ fn start_audio_capture(
     stop_flag: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::traits::{DeviceTrait, StreamTrait};
 
         // Get the default host (CoreAudio on macOS, WASAPI on Windows)
         let host = cpal::default_host();
 
         let preferred_name = state.mic_device.lock().unwrap().clone();
-        let preferred_device = preferred_name.as_ref().and_then(|name| {
-            host.input_devices()
-                .ok()?
-                .find(|d| d.description().map(|desc| desc.name().to_string()).ok().as_deref() == Some(name))
-        });
 
-        let device = match preferred_device.or_else(|| host.default_input_device()) {
+        let device = match select_input_device(&host, &preferred_name) {
             Some(d) => d,
             None => {
                 app.emit(
                     "transcription-error",
-                    serde_json::json!({"message": "No microphone found. Check System Preferences → Privacy → Microphone."}),
+                    serde_json::json!({"message": no_microphone_message()}),
                 )
                 .ok();
                 stop_flag.store(false, Ordering::SeqCst);
@@ -2957,7 +3595,7 @@ async fn finalize_recording(app: AppHandle, state: SharedState) {
             *state.pending_transcript_meta.lock().unwrap() = None;
             app.emit(
                 "transcription-error",
-                serde_json::json!({"message": "STT engine is not running. Is opendicta-worker.exe built? Run: cargo build -p opendicta-worker"}),
+                serde_json::json!({"message": "STT engine is not running. Build the opendicta-worker sidecar with: cargo build -p opendicta-worker"}),
             ).ok();
             hide_voicebar(&app);
             state.sidecar_busy.store(false, Ordering::SeqCst);
@@ -3791,53 +4429,198 @@ async fn apply_ai_with_prompt(
 // We type the text directly — more reliable than clipboard on some systems.
 // On macOS the app needs Accessibility permission for this to work.
 
+// ─── Linux paste via uinput ─────────────────────────────────────────────────
+//
+// On GNOME/Wayland every *synthetic* input path is gated behind the
+// RemoteDesktop portal: enigo's native libei path prompts directly, and its
+// XTEST path is silently relayed by XWayland through the SAME portal (Xwayland
+// calls ConnectToEIS on the app's behalf). Either way GNOME pops a "Remote
+// Desktop" permission dialog on every launch.
+//
+// Injecting the keystroke at the kernel level via /dev/uinput sidesteps all of
+// that: the compositor sees an ordinary hardware keyboard, so Ctrl+V needs no
+// portal permission and works identically on Wayland and X11. We reuse the
+// `evdev` crate already used for the global-shortcut listener, so there is no
+// new dependency. Access to /dev/uinput comes from the same udev `uaccess` rule
+// that grants the event devices.
+
+#[cfg(target_os = "linux")]
+fn linux_virtual_keyboard() -> &'static std::sync::Mutex<Option<evdev::uinput::VirtualDevice>> {
+    static KBD: std::sync::OnceLock<std::sync::Mutex<Option<evdev::uinput::VirtualDevice>>> =
+        std::sync::OnceLock::new();
+    KBD.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Create the virtual keyboard once at startup so the compositor has time to
+/// detect it before the first paste (freshly-created uinput devices drop their
+/// earliest events).
+#[cfg(target_os = "linux")]
+fn linux_init_virtual_keyboard() {
+    use evdev::{uinput::VirtualDeviceBuilder, AttributeSet, Key};
+    let mut keys = AttributeSet::<Key>::new();
+    keys.insert(Key::KEY_LEFTCTRL);
+    keys.insert(Key::KEY_V);
+
+    let built = (|| -> std::io::Result<evdev::uinput::VirtualDevice> {
+        VirtualDeviceBuilder::new()?
+            .name("OpenDicta Virtual Keyboard")
+            .with_keys(&keys)?
+            .build()
+    })();
+
+    match built {
+        Ok(dev) => {
+            *linux_virtual_keyboard().lock().unwrap() = Some(dev);
+            eprintln!("[opendicta] virtual keyboard (uinput) ready for paste");
+        }
+        Err(e) => eprintln!(
+            "[opendicta] could not create uinput virtual keyboard ({}). \
+             Auto-paste will fall back to a manual clipboard hint. \
+             Ensure the OpenDicta udev rule grants /dev/uinput access.",
+            e
+        ),
+    }
+}
+
+/// Emit Ctrl+V from the virtual keyboard. Small gaps between events ensure the
+/// compositor registers Ctrl as held while V is pressed.
+#[cfg(target_os = "linux")]
+fn linux_paste_ctrl_v() -> std::io::Result<()> {
+    use evdev::{EventType, InputEvent, Key};
+    let mut guard = linux_virtual_keyboard().lock().unwrap();
+    let dev = guard.as_mut().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "virtual keyboard not initialised")
+    })?;
+    let ctrl = Key::KEY_LEFTCTRL.code();
+    let v = Key::KEY_V.code();
+    let t = EventType::KEY;
+    dev.emit(&[InputEvent::new(t, ctrl, 1)])?;
+    std::thread::sleep(std::time::Duration::from_millis(12));
+    dev.emit(&[InputEvent::new(t, v, 1)])?;
+    std::thread::sleep(std::time::Duration::from_millis(12));
+    dev.emit(&[InputEvent::new(t, v, 0)])?;
+    std::thread::sleep(std::time::Duration::from_millis(12));
+    dev.emit(&[InputEvent::new(t, ctrl, 0)])?;
+    Ok(())
+}
+
 fn paste_text(app: &AppHandle, text: &str) {
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    // Always write to clipboard first — this works on both Wayland and X11.
+    let clipboard_ok = app
+        .clipboard()
+        .write_text(text.to_string())
+        .map(|_| true)
+        .unwrap_or_else(|e| {
+            eprintln!("Clipboard write failed: {}", e);
+            false
+        });
 
-    match Enigo::new(&Settings::default()) {
-        Ok(mut enigo) => {
-            // Delay to ensure the original app regains focus before typing.
-            std::thread::sleep(std::time::Duration::from_millis(360));
-            let clipboard_ok = app
-                .clipboard()
-                .write_text(text.to_string())
-                .map(|_| true)
-                .unwrap_or_else(|e| {
-                    eprintln!("Clipboard write failed: {}", e);
-                    false
-                });
+    // Delay to ensure the original app regains focus before injecting keys.
+    std::thread::sleep(std::time::Duration::from_millis(360));
 
-            if clipboard_ok {
-                let mut pasted = true;
-                if let Err(e) = enigo.key(Key::Control, Direction::Press) {
-                    eprintln!("Ctrl down failed: {}", e);
-                    pasted = false;
-                }
-                if let Err(e) = enigo.key(Key::Unicode('v'), Direction::Click) {
-                    eprintln!("V click failed: {}", e);
-                    pasted = false;
-                }
-                if let Err(e) = enigo.key(Key::Control, Direction::Release) {
-                    eprintln!("Ctrl up failed: {}", e);
-                }
-
-                if pasted {
+    #[cfg(target_os = "linux")]
+    {
+        if clipboard_ok {
+            match linux_paste_ctrl_v() {
+                Ok(()) => {
                     #[cfg(debug_assertions)]
-                    println!("[ai] paste sent via clipboard+Ctrl+V");
+                    println!("[ai] paste sent via uinput Ctrl+V");
                     return;
                 }
+                Err(e) => {
+                    eprintln!("uinput paste failed: {} — falling back to manual hint", e);
+                }
             }
+        }
+        // Text is already on the clipboard — ask the UI to show a manual hint.
+        let _ = app.emit("paste-manual-required", serde_json::json!({ "text": text }));
+    }
 
-            if let Err(e) = enigo.text(text) {
-                eprintln!("Paste typing fallback failed: {} — text: {}", e, text);
-            } else {
-                #[cfg(debug_assertions)]
-                println!("[ai] paste sent via typing fallback");
+    #[cfg(not(target_os = "linux"))]
+    {
+        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+        match Enigo::new(&Settings::default()) {
+            Ok(mut enigo) => {
+                if clipboard_ok {
+                    let mut pasted = true;
+                    if let Err(e) = enigo.key(Key::Control, Direction::Press) {
+                        eprintln!("Ctrl down failed: {}", e);
+                        pasted = false;
+                    }
+                    if let Err(e) = enigo.key(Key::Unicode('v'), Direction::Click) {
+                        eprintln!("V click failed: {}", e);
+                        pasted = false;
+                    }
+                    if let Err(e) = enigo.key(Key::Control, Direction::Release) {
+                        eprintln!("Ctrl up failed: {}", e);
+                    }
+                    if pasted {
+                        #[cfg(debug_assertions)]
+                        println!("[ai] paste sent via clipboard+Ctrl+V");
+                        return;
+                    }
+                }
+                if let Err(e) = enigo.text(text) {
+                    eprintln!("Paste typing fallback failed: {} — text: {}", e, text);
+                } else {
+                    #[cfg(debug_assertions)]
+                    println!("[ai] paste sent via typing fallback");
+                }
+            }
+            Err(e) => {
+                eprintln!("Could not create enigo instance: {}", e);
+                if clipboard_ok {
+                    let _ = app.emit("paste-manual-required", serde_json::json!({ "text": text }));
+                }
             }
         }
-        Err(e) => {
-            eprintln!("Could not create enigo instance: {}", e);
-        }
+    }
+}
+
+// ─── Linux diagnostics ───────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct LinuxStatus {
+    wayland: bool,
+    xwayland: bool,
+    evdev_ok: bool,
+    evdev_error: Option<String>,
+    enigo_likely_ok: bool,
+}
+
+#[tauri::command]
+fn get_linux_status() -> Option<LinuxStatus> {
+    #[cfg(target_os = "linux")]
+    {
+        let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+        let xwayland = std::env::var("DISPLAY").is_ok();
+        let evdev_done = EVDEV_INIT_DONE.get().is_some();
+        let evdev_error = if evdev_done {
+            EVDEV_INIT_ERROR.get().and_then(|v| v.clone())
+        } else {
+            Some("Shortcut listener not yet initialised".to_string())
+        };
+        let evdev_ok = evdev_done && evdev_error.is_none();
+        // enigo uses libxdo (X11). On pure Wayland without XWayland it will fail.
+        let enigo_likely_ok = !wayland || xwayland;
+        return Some(LinuxStatus { wayland, xwayland, evdev_ok, evdev_error, enigo_likely_ok });
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Returns available bytes on the filesystem containing `path`, or None if unavailable.
+#[cfg(unix)]
+fn available_disk_space_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ret == 0 {
+        Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+    } else {
+        None
     }
 }
 
@@ -3859,7 +4642,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id("main-tray")
         .icon(tray_icon)
         .menu(&menu)
-        .tooltip("OpenDicta — Press Right Ctrl to record")
+        .tooltip(format!("OpenDicta - Press {} to record", DEFAULT_SHORTCUT))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "settings" => open_settings(app),
             "quit" => app.exit(0),
@@ -3921,7 +4704,9 @@ fn register_hotkey(app: &AppHandle, state: SharedState, hotkey: &str) -> Result<
 fn uses_native_key_hook(hotkey: &str) -> bool {
     #[cfg(target_os = "windows")]
     { native_vk_code(hotkey).is_some() }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    { let _ = hotkey; true } // all shortcuts go through evdev on Linux
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     { let _ = hotkey; false }
 }
 
@@ -3935,8 +4720,19 @@ fn hotkey_is_registered(app: &AppHandle, state: &SharedState, hotkey: &str) -> b
 
 fn unregister_hotkey(app: &AppHandle, state: SharedState, hotkey: &str) -> Result<(), String> {
     if uses_native_key_hook(hotkey) {
-        state.right_ctrl_stop.store(true, Ordering::SeqCst);
-        state.right_ctrl_active.store(false, Ordering::SeqCst);
+        #[cfg(target_os = "linux")]
+        {
+            // Remove from evdev list; threads keep running for remaining shortcuts
+            evdev_shortcuts().lock().unwrap().retain(|s| s.raw != hotkey);
+            return Ok(());
+        }
+        #[cfg(target_os = "windows")]
+        {
+            state.right_ctrl_stop.store(true, Ordering::SeqCst);
+            state.right_ctrl_active.store(false, Ordering::SeqCst);
+            return Ok(());
+        }
+        #[allow(unreachable_code)]
         return Ok(());
     }
     if app.global_shortcut().is_registered(hotkey) {
@@ -4172,13 +4968,25 @@ fn register_native_key(
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn register_native_key(
+    app: &AppHandle,
+    state: SharedState,
+    hotkey: &str,
+) -> Result<(), String> {
+    let shortcut = parse_linux_shortcut(hotkey)
+        .ok_or_else(|| format!("Cannot map shortcut '{}' to evdev keys", hotkey))?;
+    evdev_shortcuts().lock().unwrap().push(shortcut);
+    start_evdev_threads(app.clone(), state)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn register_native_key(
     _app: &AppHandle,
     _state: SharedState,
     hotkey: &str,
 ) -> Result<(), String> {
-    Err(format!("Native key hook for '{}' is only supported on Windows in this build", hotkey))
+    Err(format!("Native key hook for '{}' is not supported on this platform", hotkey))
 }
 
 fn setup_hotkey(app: &AppHandle, state: SharedState) -> Result<(), String> {
@@ -4220,6 +5028,26 @@ fn setup_hotkey(app: &AppHandle, state: SharedState) -> Result<(), String> {
 // ─── App Entry Point ──────────────────────────────────────────────────────────
 
 pub fn run() {
+    // Run the GUI under XWayland on GNOME/Wayland so the voicebar overlay does
+    // not steal keyboard focus from the user's text field: native Wayland gives
+    // an app no reliable way to opt out of focus-on-map, but Mutter honours the
+    // X11 focus hints (focus_on_map/accept_focus) we set on XWayland windows.
+    // (Auto-paste no longer depends on this — it uses /dev/uinput, see
+    // linux_paste_ctrl_v — but keeping the GUI on X11 is what fixes focus.)
+    // Only pin X11 when XWayland (DISPLAY) is available; otherwise stay on
+    // native Wayland. Must run before any GTK initialisation.
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("DISPLAY").is_some() {
+            std::env::set_var("GDK_BACKEND", "x11");
+            std::env::remove_var("WAYLAND_DISPLAY");
+            // Keep the session consistent for any library that checks
+            // XDG_SESSION_TYPE (e.g. clipboard backends) rather than
+            // WAYLAND_DISPLAY.
+            std::env::set_var("XDG_SESSION_TYPE", "x11");
+        }
+    }
+
     let _ = keyring::use_native_store(false);
     let state: SharedState = Arc::new(AppState::new());
 
@@ -4273,6 +5101,7 @@ pub fn run() {
             get_audio_input_info,
             test_microphone,
             set_audio_input_device,
+            set_mic_meter,
             get_completion_sound,
             set_completion_sound,
             get_default_shortcut,
@@ -4309,6 +5138,7 @@ pub fn run() {
             test_ai_connection,
             get_stt_language,
             set_stt_language,
+            get_linux_status,
         ])
         .setup(move |app| {
             // Hide from macOS Dock — we're a menu bar app
@@ -4329,7 +5159,26 @@ pub fn run() {
             // transparent always-on-top window can intercept onboarding clicks.
             if let Some(win) = app.get_webview_window("voicebar") {
                 let _ = win.set_focusable(false);
+                // On GNOME/Wayland set_focusable (GTK accept-focus) is NOT honoured
+                // when the surface is mapped, so showing the pill on push-to-talk
+                // steals keyboard focus from the field the user is typing into.
+                // Setting focus_on_map(false) on the underlying GTK window fixes
+                // it. This runs on the main thread (setup) and the property
+                // persists across hide/show, so it applies to every show_voicebar.
+                #[cfg(target_os = "linux")]
+                {
+                    use gtk::prelude::GtkWindowExt;
+                    if let Ok(gtk_win) = win.gtk_window() {
+                        gtk_win.set_accept_focus(false);
+                        gtk_win.set_focus_on_map(false);
+                    }
+                }
             }
+
+            // Create the uinput virtual keyboard used for auto-paste on Linux.
+            // Done at startup so the compositor detects it before the first paste.
+            #[cfg(target_os = "linux")]
+            linux_init_virtual_keyboard();
 
             // Log the worker binary path so it's easy to diagnose missing-binary issues.
             let worker = worker_binary_path();
@@ -4340,7 +5189,9 @@ pub fn run() {
             );
 
             setup_tray(app.handle())?;
-            setup_hotkey(app.handle(), state.clone())?;
+            if let Err(e) = setup_hotkey(app.handle(), state.clone()) {
+                eprintln!("Shortcuts unavailable: {}. The app will run without global shortcuts.", e);
+            }
 
             // First-run onboarding flow.
             let model_ready = model_data_dir(app.handle())
@@ -4365,8 +5216,9 @@ pub fn run() {
                     let app_inner = app_settings.clone();
                     let _ = app_settings.run_on_main_thread(move || {
                         if app_inner.get_webview_window("settings").is_none() {
-                            let (width, height, min_width, min_height) = settings_window_dimensions();
-                            let _ = tauri::WebviewWindowBuilder::new(
+                            let (default_width, default_height, min_width, min_height) = settings_window_dimensions();
+                            let (width, height) = load_settings_window_size(&app_inner).unwrap_or((default_width, default_height));
+                            let builder = tauri::WebviewWindowBuilder::new(
                                 &app_inner,
                                 "settings",
                                 tauri::WebviewUrl::App("/?window=settings".into()),
@@ -4375,11 +5227,17 @@ pub fn run() {
                             .inner_size(width, height)
                             .min_inner_size(min_width, min_height)
                             .resizable(true)
-                            .decorations(false)
-                            .transparent(true)
                             .position(-32000.0, -32000.0)
-                            .skip_taskbar(false)
-                            .build();
+                            .skip_taskbar(false);
+
+                            #[cfg(target_os = "linux")]
+                            let builder = builder.decorations(true).transparent(false);
+                            #[cfg(not(target_os = "linux"))]
+                            let builder = builder.decorations(false).transparent(true);
+
+                            if let Ok(win) = builder.build() {
+                                subscribe_settings_window_resize(&app_inner, &win);
+                            }
                         }
                     });
                 });

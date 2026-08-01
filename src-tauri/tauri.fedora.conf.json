@@ -1,0 +1,35 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": [
+      "rpm"
+    ],
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
+    "externalBin": [
+      "binaries/opendicta-worker"
+    ],
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "linux": {
+      "rpm": {
+        "depends": [
+          "webkit2gtk4.1",
+          "libappindicator-gtk3",
+          "librsvg2",
+          "libxdo",
+          "alsa-lib"
+        ],
+        "files": {
+          "/etc/udev/rules.d/99-opendicta.rules": "scripts/99-opendicta.rules"
+        },
+        "postInstallScript": "scripts/rpm-post-install.sh"
+      }
+    },
+    "resources": {}
+  }
+}

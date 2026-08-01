@@ -5,6 +5,7 @@ import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/
 import Waveform from "../components/Waveform";
 import { AlertIcon, CheckIcon, GearIcon, MicIcon, XIcon } from "../ui/icons";
 import { IconButton } from "../ui/controls";
+import { DEFAULT_SHORTCUT } from "../lib/shortcutUtils";
 
 type State = "idle" | "recording" | "processing" | "done" | "error" | "cancelled";
 
@@ -13,9 +14,10 @@ export default function VoiceBar() {
   const [visible, setVisible]       = useState(false);
   const [statusText, setStatusText] = useState("Ready");
   const [level, setLevel]           = useState(0);
-  const [shortcut, setShortcut]     = useState("RCtrl");
+  const [shortcut, setShortcut]     = useState(DEFAULT_SHORTCUT);
   const [completionSound, setCompletionSound] = useState(false);
   const [activeProfile, setActiveProfile] = useState<string | null>(null);
+  const [pasteHint, setPasteHint] = useState(false);
 
   const doneHideTimerRef   = useRef<number | null>(null);
   const errorHideTimerRef  = useRef<number | null>(null);
@@ -161,6 +163,18 @@ export default function VoiceBar() {
       completionSoundRef.current = enabled;
     });
 
+    const unlistenPasteManual = listen("paste-manual-required", () => {
+      clearHideTimers();
+      setVisible(true);
+      setState("done");
+      setPasteHint(true);
+      setStatusText("Copied — press Ctrl+V");
+      doneHideTimerRef.current = window.setTimeout(() => {
+        setPasteHint(false);
+        hideAndReset();
+      }, 3000);
+    });
+
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
@@ -179,6 +193,7 @@ export default function VoiceBar() {
       unlistenHide.then(fn => fn());
       unlistenProfile.then(fn => fn());
       unlistenCompletionSound.then(fn => fn());
+      unlistenPasteManual.then(fn => fn());
     };
   }, []);
 
@@ -238,6 +253,7 @@ export default function VoiceBar() {
     setStatusText("Ready");
     setVisible(false);
     setLevel(0);
+    setPasteHint(false);
     document.documentElement.removeAttribute("data-vb");
   }
 
@@ -287,7 +303,10 @@ export default function VoiceBar() {
           )}
           {isDone && (
             <div className="pill-status">
-              <div className="pill-check"><CheckIcon /></div>
+              {pasteHint
+                ? <div className="pill-alert" style={{ color: "var(--accent)" }}>⌨</div>
+                : <div className="pill-check"><CheckIcon /></div>
+              }
               <span className="pill-status-text pill-status-text--done">{statusText}</span>
             </div>
           )}

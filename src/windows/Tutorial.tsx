@@ -1,10 +1,14 @@
 import { useState, type ReactNode } from "react";
 import { Button } from "../ui/controls";
+import { DEFAULT_SHORTCUT } from "../lib/shortcutUtils";
 
 type Shortcuts = { record: string; quickSwitcher: string };
 type VisualProps = { shortcuts: Shortcuts };
 
-const DEFAULT_SHORTCUTS: Shortcuts = { record: "Ctrl", quickSwitcher: "Ctrl+Shift+Space" };
+const DEFAULT_SHORTCUTS: Shortcuts = {
+  record: DEFAULT_SHORTCUT,
+  quickSwitcher: "Ctrl+Shift+Space",
+};
 
 type TourStep = {
   id: string;
